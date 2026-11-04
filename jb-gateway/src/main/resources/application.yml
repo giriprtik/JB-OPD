@@ -1,0 +1,40 @@
+server:
+  port: 8080 # single public entry point for every API call
+
+spring:
+  application:
+    name: jb-gateway
+  cloud:
+    gateway:
+      # The UI normally calls the gateway same-origin (through nginx or the Vite dev proxy),
+      # so CORS only matters when the UI is served from another origin.
+      globalcors:
+        cors-configurations:
+          '[/**]':
+            allowedOrigins:
+              - "http://localhost:3000"
+              - "http://localhost:5173"
+            allowedMethods: [GET, POST, PUT, PATCH, DELETE, OPTIONS]
+            allowedHeaders: "*"
+            allowCredentials: true
+      routes:
+        - id: auth-service-route
+          uri: ${AUTH_SERVICE_URL:http://jb-auth-api:8081}
+          predicates:
+            - Path=/api/v1/auth/**
+          filters:
+            # Internal service-to-service lookups authenticate with this header; strip it from outside traffic.
+            - RemoveRequestHeader=X-Internal-Secret
+        - id: opd-service-route
+          uri: ${OPD_SERVICE_URL:http://jb-opd-service:8082}
+          predicates:
+            - Path=/api/v1/opd/**
+        - id: lab-service-route
+          uri: ${LAB_SERVICE_URL:http://jb-lab-service:8083}
+          predicates:
+            - Path=/api/v1/lab/**
+
+logging:
+  level:
+    root: INFO
+    org.springframework.cloud.gateway: INFO
