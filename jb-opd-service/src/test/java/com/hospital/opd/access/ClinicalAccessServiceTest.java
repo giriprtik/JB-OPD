@@ -11,6 +11,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import java.time.Duration;
 import java.time.OffsetDateTime;
+import java.time.temporal.ChronoUnit;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -44,7 +45,7 @@ class ClinicalAccessServiceTest {
         assertThat(grant.getUsername()).isEqualTo("drkarki");
         assertThat(grant.getReason()).isEqualTo("Covering emergency");
         assertThat(Duration.between(grant.getGrantedAt(), grant.getExpiresAt())).isEqualTo(ClinicalAccessService.GRANT_LENGTH);
-        assertThat(grant.getGrantedAt()).isCloseTo(OffsetDateTime.now(), within(Duration.ofSeconds(5)));
+        assertThat(grant.getGrantedAt()).isCloseTo(OffsetDateTime.now(), within(5, ChronoUnit.SECONDS));
 
         ArgumentCaptor<ClinicalAccessLog> logged = ArgumentCaptor.forClass(ClinicalAccessLog.class);
         verify(log).save(logged.capture());
