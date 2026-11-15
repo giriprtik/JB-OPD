@@ -72,7 +72,7 @@ export function AppShell() {
             </div>
           </div>
           <button
-            onClick={() => { logout(); navigate('/login'); }}
+            onClick={async () => { await logout(); navigate('/login'); }}
             className="mt-1 w-full flex items-center gap-3 h-9 px-3 rounded-lg text-[13px] text-ink-3 hover:bg-subtle hover:text-ink max-lg:justify-center max-lg:px-0"
             title="Sign out"
           >

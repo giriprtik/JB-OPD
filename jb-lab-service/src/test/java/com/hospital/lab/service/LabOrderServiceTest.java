@@ -11,6 +11,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
 import org.springframework.web.server.ResponseStatusException;
@@ -19,6 +20,7 @@ import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Optional;
+import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -43,6 +45,11 @@ class LabOrderServiceTest {
             o.setId(10L);
             return o;
         });
+        when(orders.saveAndFlush(any(LabOrder.class))).thenAnswer(inv -> {
+            LabOrder o = inv.getArgument(0);
+            o.setId(10L);
+            return o;
+        });
         when(samples.saveAndFlush(any(LabSampleCollection.class))).thenAnswer(inv -> {
             collected.add(inv.getArgument(0));
             return inv.getArgument(0);
@@ -60,13 +67,57 @@ class LabOrderServiceTest {
         request.setPatientName("Ram Bahadur");
         request.setTestCodes(List.of(" cbc", "CBC", "lft ", "  "));
 
-        LabOrderResponse response = service.createOrder(request, "doctor");
+        LabOrderService.Created created = service.createOrder(request, "doctor");
+        LabOrderResponse response = created.order();
 
+        assertThat(created.isNew()).isTrue();
         assertThat(response.testCodes()).containsExactly("CBC", "LFT");
         assertThat(response.patientMrn()).isEqualTo("JB-000007");
         assertThat(response.orderedByDoctor()).isEqualTo("doctor");
         assertThat(response.orderStatus()).isEqualTo(LabOrderStatus.PLACED);
         assertThat(response.samples()).extracting(LabOrderResponse.Sample::collected).containsExactly(false, false);
+    }
+
+    @Nested
+    @DisplayName("createOrder idempotency")
+    class Idempotency {
+
+        @Test
+        void aRepeatedRequestIdReturnsTheExistingOrderWithoutCreatingAnother() {
+            UUID key = UUID.randomUUID();
+            LabOrder existing = order(LabOrderStatus.PLACED, "CBC");
+            existing.setRequestId(key);
+            when(orders.findByRequestId(key)).thenReturn(Optional.of(existing));
+
+            LabOrderRequest request = new LabOrderRequest();
+            request.setRequestId(key);
+            request.setVisitId(5L);
+            request.setPatientMrn("JB-000007");
+            request.setTestCodes(List.of("CBC"));
+
+            LabOrderService.Created created = service.createOrder(request, "doctor");
+
+            assertThat(created.isNew()).isFalse();
+            assertThat(created.order().id()).isEqualTo(10L);
+            verify(orders, never()).saveAndFlush(any());
+        }
+
+        @Test
+        void aNewRequestIdIsStoredOnTheOrder() {
+            UUID key = UUID.randomUUID();
+            when(orders.findByRequestId(key)).thenReturn(Optional.empty());
+            LabOrderRequest request = new LabOrderRequest();
+            request.setRequestId(key);
+            request.setVisitId(5L);
+            request.setPatientMrn("JB-000007");
+            request.setTestCodes(List.of("CBC"));
+
+            service.createOrder(request, "doctor");
+
+            ArgumentCaptor<LabOrder> saved = ArgumentCaptor.forClass(LabOrder.class);
+            verify(orders).saveAndFlush(saved.capture());
+            assertThat(saved.getValue().getRequestId()).isEqualTo(key);
+        }
     }
 
     @Nested

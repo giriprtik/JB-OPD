@@ -1,5 +1,6 @@
 package com.hospital.opd.model;
 
+import com.hospital.opd.crypto.EncryptedStringConverter;
 import jakarta.persistence.*;
 import java.math.BigDecimal;
 import java.time.OffsetDateTime;
@@ -30,6 +31,7 @@ public class VitalSigns {
     @Column(name = "oxygen_saturation", nullable = false)
     private Integer oxygenSaturation;
 
+    @Convert(converter = EncryptedStringConverter.class)   // AES-GCM at rest
     @Column(name = "symptoms_brief", columnDefinition = "TEXT")
     private String symptomsBrief;
 

@@ -7,6 +7,8 @@ import org.springframework.stereotype.Repository;
 
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
+import java.util.UUID;
 
 @Repository
 public interface LabOrderRepository extends JpaRepository<LabOrder, Long> {
@@ -14,4 +16,5 @@ public interface LabOrderRepository extends JpaRepository<LabOrder, Long> {
     List<LabOrder> findByVisitId(Long visitId);
     List<LabOrder> findByOrderStatus(LabOrderStatus status);
     List<LabOrder> findByOrderStatusInOrderByOrderedAtAsc(Collection<LabOrderStatus> statuses);
+    Optional<LabOrder> findByRequestId(UUID requestId);
 }

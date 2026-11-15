@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState, type FormEvent, type ReactNode } from 're
 import { AlertTriangle, CheckCircle2, Droplets, FileText, FlaskConical, Gauge, HeartPulse, History, Send, Thermometer, X } from 'lucide-react';
 import { LabApi, OpdApi } from '../../lib/services';
 import { apiError } from '../../lib/api';
-import type { LabTest, QueueItem, VisitEvent, VisitLabResults } from '../../lib/types';
+import type { LabTest, QueueItem, VisitClinicalView, VisitEvent, VisitLabResults } from '../../lib/types';
 import { EVENT_LABEL, ageSex, bpFlag, dateTime, pulseFlag, spo2Flag, tempFlag, time, type Flag } from '../../lib/format';
 import { Alert, Badge, Button, Card, CardHeader, Field, FlagBadge, Input, LabStatusBadge, Meta, PriorityBadge, Spinner, StatusBadge, Textarea, Token, cx, flagText } from '../../components/ui';
 
@@ -21,13 +21,20 @@ function Vital({ icon, label, value, unit, flag }: { icon: ReactNode; label: str
 export function Consultation({ visitId, onChanged, onClose }: { visitId: number; onChanged: () => void; onClose: () => void }) {
   const [v, setV] = useState<QueueItem | null>(null);
   const [lab, setLab] = useState<VisitLabResults | null>(null);
+  const [clinical, setClinical] = useState<VisitClinicalView | null>(null);
   const [events, setEvents] = useState<VisitEvent[]>([]);
   const [catalogue, setCatalogue] = useState<LabTest[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [done, setDone] = useState<string | null>(null);
 
   const load = () => {
-    OpdApi.visit(visitId).then(setV).catch((e) => setLoadError(apiError(e, "Couldn't load the visit")));
+    OpdApi.visit(visitId)
+      .then((visit) => {
+        setV(visit);
+        // Diagnosis/notes come from a separate, access-checked and audited endpoint.
+        if (visit.status === 'COMPLETED') OpdApi.clinical(visitId).then(setClinical).catch(() => setClinical(null));
+      })
+      .catch((e) => setLoadError(apiError(e, "Couldn't load the visit")));
     OpdApi.labResults(visitId).then(setLab).catch(() => setLab(null));
     OpdApi.events(visitId).then(setEvents).catch(() => setEvents([]));
   };
@@ -99,8 +106,8 @@ export function Consultation({ visitId, onChanged, onClose }: { visitId: number;
       {v.status === 'AWAITING_LAB' && (
         <Alert kind="info" title="Waiting for the lab">You can sign off once results are released. This page checks for results every 20 seconds.</Alert>
       )}
-      {v.status === 'COMPLETED' && v.diagnosis && (
-        <Alert kind="success" title="Completed">Diagnosis: {v.diagnosis}</Alert>
+      {v.status === 'COMPLETED' && clinical?.diagnosis && (
+        <Alert kind="success" title="Completed">Diagnosis: {clinical.diagnosis}</Alert>
       )}
 
       <Timeline events={events} />

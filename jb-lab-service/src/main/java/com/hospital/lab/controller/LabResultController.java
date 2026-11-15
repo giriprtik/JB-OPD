@@ -31,7 +31,8 @@ public class LabResultController {
      * Doctors review findings; lab techs and admins can view what was entered.
      */
     @GetMapping("/order/{orderId}")
-    @PreAuthorize("hasAnyRole('DOCTOR', 'LABTECH', 'ADMIN')")
+    // Doctors read results through OPD (assigned-doctor check there, then OPD's SYSTEM token).
+    @PreAuthorize("hasAnyRole('LABTECH', 'SYSTEM')")
     public ResponseEntity<List<LabResultResponse>> viewOrderResults(@PathVariable Long orderId) {
         return ResponseEntity.ok(labResultService.getResultsByOrder(orderId));
     }

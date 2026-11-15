@@ -6,6 +6,11 @@ spring:
     name: jb-gateway
   cloud:
     gateway:
+      # Fail fast instead of holding browser connections open on a hung service.
+      # response-timeout is time to first byte, so long-lived SSE streams are unaffected once they start.
+      httpclient:
+        connect-timeout: 2000
+        response-timeout: 20s
       # The UI normally calls the gateway same-origin (through nginx or the Vite dev proxy),
       # so CORS only matters when the UI is served from another origin.
       globalcors:

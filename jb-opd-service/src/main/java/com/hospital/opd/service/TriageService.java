@@ -58,8 +58,7 @@ public class TriageService {
 
         if (visit.getStatus() == VisitStatus.REGISTERED) {
             visitService.transitionStatus(visit.getId(), EnumSet.of(VisitStatus.REGISTERED), VisitStatus.TRIAGED,
-                    nurse, "Vitals recorded: BP " + saved.getBloodPressure() + ", T " + saved.getTemperatureCelsius()
-                            + "°C, HR " + saved.getPulseRate() + ", SpO2 " + saved.getOxygenSaturation() + "%");
+                    nurse, "Vitals recorded");   // the readings live in vital_signs; keep the audit trail free of clinical data
         }
         return toResponse(saved);
     }

@@ -12,6 +12,8 @@ import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.web.server.ResponseStatusException;
+import org.springframework.security.core.Authentication;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
@@ -36,13 +38,28 @@ public class LabOrderController {
         this.resultEntryService = resultEntryService;
     }
 
-    /** Doctor places a lab order (called by the OPD service with the doctor's JWT). */
+    /**
+     * Places a lab order. Callers:
+     *  - a doctor's own token: the doctor is the token's subject;
+     *  - OPD's outbox relay with a SYSTEM token: the doctor comes from orderedByDoctor in the body.
+     * 201 for a new order, 200 when the requestId was already used (same order returned).
+     */
     @PostMapping
-    @PreAuthorize("hasRole('DOCTOR')")
-    public ResponseEntity<LabOrderResponse> placeOrder(
-            @Valid @RequestBody LabOrderRequest request,
-            @AuthenticationPrincipal String doctorUsername) {
-        return new ResponseEntity<>(labOrderService.createOrder(request, doctorUsername), HttpStatus.CREATED);
+    @PreAuthorize("hasAnyRole('DOCTOR', 'SYSTEM')")
+    public ResponseEntity<LabOrderResponse> placeOrder(@Valid @RequestBody LabOrderRequest request,
+                                                       Authentication auth) {
+        boolean system = auth.getAuthorities().stream().anyMatch(a -> "ROLE_SYSTEM".equals(a.getAuthority()));
+        String doctor;
+        if (system) {
+            if (request.getOrderedByDoctor() == null || request.getOrderedByDoctor().isBlank()) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "orderedByDoctor is required for service calls");
+            }
+            doctor = request.getOrderedByDoctor().trim();
+        } else {
+            doctor = auth.getName();
+        }
+        LabOrderService.Created created = labOrderService.createOrder(request, doctor);
+        return ResponseEntity.status(created.isNew() ? HttpStatus.CREATED : HttpStatus.OK).body(created.order());
     }
 
     /** Lab worklist. No status param = all active orders; or pass ?status=PLACED&status=SAMPLE_COLLECTED */
@@ -86,7 +103,9 @@ public class LabOrderController {
 
     /** Look up orders by ID, used by OPD to check completion: GET /api/v1/lab/orders?ids=1,2,3 */
     @GetMapping
-    @PreAuthorize("hasAnyRole('DOCTOR', 'LABTECH', 'ADMIN')")
+    // Doctors read lab data through OPD, which checks they're the assigned doctor and then calls with its
+    // SYSTEM service token. A doctor token can't fetch arbitrary orders straight through the gateway.
+    @PreAuthorize("hasAnyRole('LABTECH', 'SYSTEM')")
     public ResponseEntity<List<LabOrderResponse>> getOrders(@RequestParam List<Long> ids) {
         return ResponseEntity.ok(labOrderService.getOrdersByIds(ids));
     }

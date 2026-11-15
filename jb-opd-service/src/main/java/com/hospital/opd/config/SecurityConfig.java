@@ -1,5 +1,6 @@
 package com.hospital.opd.config;
 
+import jakarta.servlet.DispatcherType;
 import com.hospital.opd.security.JwtAuthenticationFilter;
 import jakarta.servlet.http.HttpServletResponse;
 import org.springframework.context.annotation.Bean;
@@ -33,6 +34,8 @@ public class SecurityConfig {
             .httpBasic(b -> b.disable())
             .formLogin(f -> f.disable())
             .authorizeHttpRequests(auth -> auth
+                // SSE streams complete on an ASYNC dispatch that carries no JWT; the original request was already authorised.
+                .dispatcherTypeMatchers(DispatcherType.ASYNC, DispatcherType.ERROR).permitAll()
                 .requestMatchers("/actuator/health", "/error").permitAll()
                 .anyRequest().authenticated())
             .exceptionHandling(ex -> ex

@@ -28,7 +28,7 @@ public class TriageController {
      * Automatically transitions the patient visit state engine under the hood.
      */
     @PostMapping("/vitals")
-    @PreAuthorize("hasAnyRole('NURSE', 'ADMIN')")
+    @PreAuthorize("@visitAccess.canRecordVitals(#request.visitId, authentication)")
     public ResponseEntity<TriageVitalsResponse> captureVitals(
             @Valid @RequestBody TriageVitalsRequest request,
             @AuthenticationPrincipal String nurseUsername) {
@@ -40,7 +40,7 @@ public class TriageController {
 
     /** Every vitals reading for a visit, newest first. */
      @GetMapping("/vitals/visit/{visitId}")
-     @PreAuthorize("hasAnyRole('NURSE', 'DOCTOR', 'ADMIN')")
+     @PreAuthorize("hasRole('NURSE') or @visitAccess.canReadClinical(#visitId, authentication)")
      public ResponseEntity<List<TriageVitalsResponse>> getVitalsHistory(@PathVariable Long visitId) {
          List<TriageVitalsResponse> historyList = triageService.getVitalsHistoryByVisitId(visitId);
          return ResponseEntity.ok(historyList);

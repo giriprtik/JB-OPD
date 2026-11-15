@@ -1,5 +1,6 @@
 package com.hospital.opd.model;
 
+import com.hospital.opd.crypto.EncryptedStringConverter;
 import jakarta.persistence.*;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
@@ -25,6 +26,7 @@ public class Visit {
     @Column(name = "token_number", nullable = false)
     private Integer tokenNumber;
 
+    @Convert(converter = EncryptedStringConverter.class)   // AES-GCM at rest
     @Column(name = "chief_complaint", nullable = false, columnDefinition = "TEXT")
     private String chiefComplaint;
 
@@ -45,9 +47,11 @@ public class Visit {
     @Column(name = "assigned_doctor_name", length = 150)
     private String assignedDoctorName;
 
+    @Convert(converter = EncryptedStringConverter.class)   // AES-GCM at rest
     @Column(name = "consultation_notes", columnDefinition = "TEXT")
     private String consultationNotes;
 
+    @Convert(converter = EncryptedStringConverter.class)   // AES-GCM at rest
     @Column(name = "diagnosis", columnDefinition = "TEXT")
     private String diagnosis;
 

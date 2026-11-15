@@ -28,5 +28,9 @@ public abstract class PostgresIntegrationTest {
         registry.add("app.jwt.secret", () -> TestJwt.SECRET);
         registry.add("app.internal-secret", () -> TestJwt.INTERNAL_SECRET);
         registry.add("spring.flyway.baseline-on-migrate", () -> "false");
+        // No background jobs (lab sync, outbox relay, SSE heartbeat) against the mocked lab/auth services.
+        registry.add("app.scheduling.enabled", () -> "false");
+        registry.add("app.crypto.keys", () -> TestJwt.CRYPTO_KEYS);
+        registry.add("app.crypto.active-key", () -> "k1");
     }
 }

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { CheckCircle2, ClipboardList, HeartPulse, RefreshCw, UserPlus, Users } from 'lucide-react';
 import { OpdApi } from '../../lib/services';
 import { usePolling } from '../../hooks/usePolling';
+import { useQueueStream } from '../../hooks/useQueueStream';
 import { useFlash } from '../../hooks/useFlash';
 import type { QueueItem } from '../../lib/types';
 import { Alert, Button, Card, CardHeader, EmptyState, PageHeader, PriorityBadge, Spinner, StatusBadge, Token, cx } from '../../components/ui';
@@ -18,7 +19,8 @@ export default function Registration() {
   const [mode, setMode] = useState<Mode>('new');
   const [issued, setIssued] = useState<Issued | null>(null);
   const [formKey, setFormKey] = useState(0);
-  const today = usePolling(() => OpdApi.today(), [], 20000);
+  const today = usePolling(() => OpdApi.today(), [], 60000);   // fallback; SSE drives updates
+  useQueueStream(today.reload);
   const [flash, clearFlash] = useFlash();
 
   const done = (i: Issued) => { setIssued(i); today.reload(); };

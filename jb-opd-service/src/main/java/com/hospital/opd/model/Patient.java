@@ -1,5 +1,6 @@
 package com.hospital.opd.model;
 
+import com.hospital.opd.crypto.EncryptedStringConverter;
 import jakarta.persistence.*;
 import java.time.LocalDate;
 import java.time.OffsetDateTime;
@@ -40,7 +41,8 @@ public class Patient {
     @Column(name = "blood_group", length = 5)
     private String bloodGroup;
 
-    @Column(name = "allergies")
+    @Convert(converter = EncryptedStringConverter.class)   // AES-GCM at rest
+    @Column(name = "allergies", columnDefinition = "TEXT")
     private String allergies;
 
     @Column(name = "emergency_contact_name", length = 150)

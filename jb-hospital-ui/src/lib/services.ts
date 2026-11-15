@@ -1,20 +1,17 @@
-import api from './api';
+import api, { LOGOUT_URL, type SessionResponse } from './api';
 import type {
   LabOrder, LabOrderStatus, LabResultItem, LabTest, NewPatientRequest, NewVisitRequest, PatientRegistered,
-  PatientSummary, QueueItem, ResultEntry, Role, StaffSummary, TestParameter, VisitEvent, VisitLabResults,
-  VisitStatus, VitalsRecord, VitalsRequest,
+  PatientSummary, QueueItem, ResultEntry, StaffSummary, TestParameter, VisitEvent, VisitLabResults,
+  VisitClinicalView, VisitStatus, VitalsRecord, VitalsRequest,
 } from './types';
 
-export interface LoginResult {
-  accessToken: string;
-  username: string;
-  fullName: string;
-  role: Role;
-}
+/** Kept as an alias so existing imports keep working. */
+export type LoginResult = SessionResponse;
 
 export const AuthApi = {
   login: (username: string, password: string) =>
     api.post<LoginResult>('/api/v1/auth/login', { username, password }).then((r) => r.data),
+  logout: () => api.post(LOGOUT_URL).then(() => undefined),
   doctors: () => api.get<StaffSummary[]>('/api/v1/auth/doctors').then((r) => r.data),
   register: (body: Record<string, unknown>) => api.post('/api/v1/auth/register', body).then((r) => r.data),
 };
@@ -27,6 +24,7 @@ export const OpdApi = {
   openVisit: (body: NewVisitRequest) => api.post<QueueItem>('/api/v1/opd/visits', body).then((r) => r.data),
 
   visit: (id: number) => api.get<QueueItem>(`/api/v1/opd/visits/${id}`).then((r) => r.data),
+  clinical: (id: number) => api.get<VisitClinicalView>(`/api/v1/opd/visits/${id}/clinical`).then((r) => r.data),
   events: (id: number) => api.get<VisitEvent[]>(`/api/v1/opd/visits/${id}/events`).then((r) => r.data),
   today: () => api.get<QueueItem[]>('/api/v1/opd/visits/today').then((r) => r.data),
   triageQueue: () => api.get<QueueItem[]>('/api/v1/opd/visits/triage-queue').then((r) => r.data),

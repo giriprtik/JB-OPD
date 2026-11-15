@@ -28,5 +28,7 @@ public abstract class PostgresIntegrationTest {
         registry.add("app.jwt.secret", () -> TestJwt.SECRET);
         registry.add("app.internal-secret", () -> TestJwt.INTERNAL_SECRET);
         registry.add("spring.flyway.baseline-on-migrate", () -> "false");
+        registry.add("app.crypto.keys", () -> TestJwt.CRYPTO_KEYS);
+        registry.add("app.crypto.active-key", () -> "k1");
     }
 }

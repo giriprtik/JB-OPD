@@ -5,6 +5,7 @@ import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import java.util.List;
+import java.util.UUID;
 
 public class LabOrderRequest {
 
@@ -23,6 +24,13 @@ public class LabOrderRequest {
 
     private String clinicalHistory;
 
+    /** Optional idempotency key: the same key always maps to the same order. */
+    private UUID requestId;
+
+    /** Only honoured when the caller is a SYSTEM service acting for a doctor; ignored for doctor tokens. */
+    @Size(max = 50)
+    private String orderedByDoctor;
+
     public Long getVisitId() { return visitId; }
     public void setVisitId(Long visitId) { this.visitId = visitId; }
     public String getPatientMrn() { return patientMrn; }
@@ -33,4 +41,8 @@ public class LabOrderRequest {
     public void setPatientName(String patientName) { this.patientName = patientName; }
     public String getClinicalHistory() { return clinicalHistory; }
     public void setClinicalHistory(String clinicalHistory) { this.clinicalHistory = clinicalHistory; }
+    public UUID getRequestId() { return requestId; }
+    public void setRequestId(UUID requestId) { this.requestId = requestId; }
+    public String getOrderedByDoctor() { return orderedByDoctor; }
+    public void setOrderedByDoctor(String orderedByDoctor) { this.orderedByDoctor = orderedByDoctor; }
 }
