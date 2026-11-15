@@ -86,11 +86,16 @@ class EncryptionIT extends PostgresIntegrationTest {
         String tampered = stored.substring(0, stored.length() - 4) + (stored.charAt(stored.length() - 4) == 'A' ? "B" : "A")
                 + stored.substring(stored.length() - 3);
         jdbc.update("UPDATE visits SET chief_complaint = ? WHERE id = ?", tampered, visitId);
-
-        String body = mvc.perform(get("/api/v1/opd/visits/{id}", visitId).header(AUTHORIZATION, NURSE))
-                .andExpect(status().isInternalServerError())
-                .andReturn().getResponse().getContentAsString();
-        assertThat(body).doesNotContain("High fever");
+        try {
+            String body = mvc.perform(get("/api/v1/opd/visits/{id}", visitId).header(AUTHORIZATION, NURSE))
+                    .andExpect(status().isInternalServerError())
+                    .andReturn().getResponse().getContentAsString();
+            assertThat(body).doesNotContain("High fever");
+        } finally {
+            // Put the real value back: the test classes share one database, and this visit sits in
+            // "doctor"'s queue, so a corrupted row would break every later test that lists that queue.
+            jdbc.update("UPDATE visits SET chief_complaint = ? WHERE id = ?", stored, visitId);
+        }
     }
 
     @Test

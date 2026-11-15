@@ -51,7 +51,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             throws ServletException, IOException {
 
         String internal = req.getHeader(INTERNAL_HEADER);
-        if (internal != null && req.getServletPath().startsWith("/api/v1/auth/users/resolve")) {
+        if (internal != null && req.getRequestURI().substring(req.getContextPath().length()).startsWith("/api/v1/auth/users/resolve")) {
             if (MessageDigest.isEqual(clusterSecret, internal.getBytes(StandardCharsets.UTF_8))) {
                 SecurityContextHolder.getContext().setAuthentication(new UsernamePasswordAuthenticationToken(
                         "INTERNAL_SYSTEM", null, List.of(new SimpleGrantedAuthority("ROLE_SYSTEM"))));
