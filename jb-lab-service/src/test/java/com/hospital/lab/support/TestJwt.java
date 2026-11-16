@@ -12,6 +12,8 @@ public final class TestJwt {
     /** Shared signing key for the test context; must be at least 32 bytes for HS256. */
     public static final String SECRET = "test-only-jwt-secret-that-is-long-enough-for-hs256";
     public static final String INTERNAL_SECRET = "test-only-internal-secret";
+    /** Field-encryption key for tests only (32 bytes, base64). */
+    public static final String CRYPTO_KEYS = "k1:dGVzdC1vbmx5LWZpZWxkLWtleS0zMi1ieXRlcy1vayE=";
 
     private TestJwt() {}
 

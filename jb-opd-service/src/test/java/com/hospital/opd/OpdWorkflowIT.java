@@ -3,7 +3,10 @@ package com.hospital.opd;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.hospital.opd.dto.StaffSummary;
-import com.hospital.opd.repository.TokenCounterRepository;
+import com.hospital.opd.exception.DownstreamServiceException;
+import com.hospital.opd.outbox.LabOrderPayload;
+import com.hospital.opd.outbox.OutboxRelay;
+import com.hospital.opd.service.TokenIssuer;
 import com.hospital.opd.service.DoctorIntegrationService;
 import com.hospital.opd.service.LabIntegrationService;
 import com.hospital.opd.support.PostgresIntegrationTest;
@@ -12,7 +15,9 @@ import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.mockito.ArgumentCaptor;
 import org.springframework.http.HttpStatus;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
@@ -29,7 +34,7 @@ import static com.hospital.opd.support.TestJwt.*;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.hamcrest.Matchers.*;
 import static org.mockito.ArgumentMatchers.*;
-import static org.mockito.Mockito.when;
+import static org.mockito.Mockito.*;
 import static org.springframework.http.HttpHeaders.AUTHORIZATION;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
@@ -49,8 +54,10 @@ class OpdWorkflowIT extends PostgresIntegrationTest {
 
     @Autowired MockMvc mvc;
     @Autowired ObjectMapper json;
-    @Autowired TokenCounterRepository tokens;
+    @Autowired TokenIssuer tokens;
     @Autowired PlatformTransactionManager txManager;
+    @Autowired OutboxRelay relay;
+    @Autowired JdbcTemplate jdbc;
 
     @MockBean DoctorIntegrationService doctors;
     @MockBean LabIntegrationService lab;
@@ -101,20 +108,76 @@ class OpdWorkflowIT extends PostgresIntegrationTest {
         mvc.perform(post("/api/v1/opd/visits/{id}/start-consultation", visitId).header(AUTHORIZATION, DOCTOR))
                 .andExpect(status().isNoContent());
 
-        // Send to lab: the lab call is mocked, the visit moves to AWAITING_LAB.
-        when(lab.raiseLabInvestigationOrder(eq(visitId), anyString(), eq("Sita Kumari"), eq(List.of("CBC", "LFT")),
-                eq("r/o enteric fever"), eq(DOCTOR))).thenReturn(501L);
+        // Send to lab: the order is queued in the outbox and the visit moves to AWAITING_LAB straight away.
         send(post("/api/v1/opd/visits/{id}/send-to-lab", visitId), DOCTOR,
                 "{\"testCodes\": [\"CBC\", \"LFT\"], \"clinicalNotes\": \"r/o enteric fever\"}", 204);
         mvc.perform(get("/api/v1/opd/visits/{id}", visitId).header(AUTHORIZATION, NURSE))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.status").value("AWAITING_LAB"));
+                .andExpect(jsonPath("$.status").value("AWAITING_LAB"))
+                .andExpect(jsonPath("$.labOrderId").value(nullValue()));
+        verifyNoInteractions(lab);   // no HTTP call during the doctor's request
+
+        // The relay delivers it (scheduling is off in tests, so drive it by hand) with the service token.
+        ArgumentCaptor<LabOrderPayload> payload = ArgumentCaptor.forClass(LabOrderPayload.class);
+        when(lab.raiseLabInvestigationOrder(payload.capture(), org.mockito.ArgumentMatchers.startsWith("Bearer "))).thenReturn(501L);
+        relay.drain();
+
+        assertThat(payload.getValue().visitId()).isEqualTo(visitId);
+        assertThat(payload.getValue().patientName()).isEqualTo("Sita Kumari");
+        assertThat(payload.getValue().testCodes()).containsExactly("CBC", "LFT");
+        assertThat(payload.getValue().clinicalHistory()).isEqualTo("r/o enteric fever");
+        assertThat(payload.getValue().orderedByDoctor()).isEqualTo("doctor");
+        assertThat(payload.getValue().requestId()).isNotNull();
+        mvc.perform(get("/api/v1/opd/visits/{id}", visitId).header(AUTHORIZATION, NURSE))
+                .andExpect(jsonPath("$.labOrderId").value(501));
+
+        // A second drain sends nothing: the message is SENT.
+        relay.drain();
+        verify(lab, times(1)).raiseLabInvestigationOrder(any(), anyString());
 
         // Every step is in the audit trail, in order.
         mvc.perform(get("/api/v1/opd/visits/{id}/events", visitId).header(AUTHORIZATION, NURSE))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$[*].toStatus").value(contains("REGISTERED", "TRIAGED", "IN_CONSULTATION", "AWAITING_LAB")))
-                .andExpect(jsonPath("$[3].note").value("Lab order #501: CBC, LFT"));
+                .andExpect(jsonPath("$[*].toStatus").value(contains("REGISTERED", "TRIAGED", "IN_CONSULTATION", "AWAITING_LAB", "AWAITING_LAB")))
+                .andExpect(jsonPath("$[3].note").value("Lab order queued: CBC, LFT"))
+                .andExpect(jsonPath("$[4].note").value("Lab order #501 accepted by the lab: CBC, LFT"));
+    }
+
+    @Test
+    void aLabOrderTheLabRejectsGoesBackToTheDoctorWithTheReason() throws Exception {
+        long visitId = triagedVisit();
+        mvc.perform(post("/api/v1/opd/visits/{id}/start-consultation", visitId).header(AUTHORIZATION, DOCTOR))
+                .andExpect(status().isNoContent());
+        send(post("/api/v1/opd/visits/{id}/send-to-lab", visitId), DOCTOR, "{\"testCodes\": [\"NOPE\"]}", 204);
+
+        when(lab.raiseLabInvestigationOrder(any(), anyString())).thenThrow(new DownstreamServiceException(
+                "lab-service", 400, HttpStatus.BAD_REQUEST, "Lab service returned 400", null));
+        relay.drain();
+
+        mvc.perform(get("/api/v1/opd/visits/{id}", visitId).header(AUTHORIZATION, NURSE))
+                .andExpect(jsonPath("$.status").value("IN_CONSULTATION"));
+        mvc.perform(get("/api/v1/opd/visits/{id}/events", visitId).header(AUTHORIZATION, NURSE))
+                .andExpect(jsonPath("$[-1:].note").value(hasItem(org.hamcrest.Matchers.startsWith("Lab order could not be delivered"))));
+    }
+
+    @Test
+    void aLabOutageKeepsTheOrderQueuedUntilTheLabIsBack() throws Exception {
+        long visitId = triagedVisit();
+        send(post("/api/v1/opd/visits/{id}/send-to-lab", visitId), DOCTOR, "{\"testCodes\": [\"CBC\"]}", 204);
+
+        when(lab.raiseLabInvestigationOrder(any(), anyString())).thenThrow(new DownstreamServiceException(
+                "lab-service", null, HttpStatus.SERVICE_UNAVAILABLE, "Lab service unreachable", null));
+        relay.drain();
+
+        Map<String, Object> row = jdbc.queryForMap(
+                "SELECT status, attempts FROM outbox_message WHERE aggregate_id = ?", visitId);
+        assertThat(row.get("status")).isEqualTo("PENDING");
+        assertThat(row.get("attempts")).isEqualTo(1);
+        mvc.perform(get("/api/v1/opd/visits/{id}", visitId).header(AUTHORIZATION, NURSE))
+                .andExpect(jsonPath("$.status").value("AWAITING_LAB"));
+
+        // Tidy up so other tests' manual drains don't pick this message up after its backoff.
+        jdbc.update("UPDATE outbox_message SET status = 'FAILED' WHERE aggregate_id = ?", visitId);
     }
 
     // ---------------------------------------------------------------- registration rules
@@ -215,10 +278,7 @@ class OpdWorkflowIT extends PostgresIntegrationTest {
         try {
             List<Future<Integer>> issued = new ArrayList<>();
             for (int i = 0; i < 40; i++) {
-                issued.add(pool.submit(() -> tx.execute(status -> {
-                    tokens.incrementAtomicToken(day);
-                    return tokens.getCurrentTokenValue(day);
-                })));
+                issued.add(pool.submit(() -> tx.execute(status -> tokens.next(day))));
             }
             Set<Integer> numbers = new HashSet<>();
             for (Future<Integer> f : issued) numbers.add(f.get(30, TimeUnit.SECONDS));
@@ -230,6 +290,16 @@ class OpdWorkflowIT extends PostgresIntegrationTest {
     }
 
     // ---------------------------------------------------------------- helpers
+
+    /** Registers a patient for "doctor" and records vitals; returns the visit id (status TRIAGED). */
+    private long triagedVisit() throws Exception {
+        long visitId = send(post("/api/v1/opd/patients"), NURSE, newPatient(nextPhone()), 201).get("visitId").asLong();
+        send(post("/api/v1/opd/triage/vitals"), NURSE, """
+                {"visitId": %d, "temperatureCelsius": 37.0, "pulseRate": 80,
+                 "bloodPressure": "120/80", "oxygenSaturation": 98}
+                """.formatted(visitId), 201);
+        return visitId;
+    }
 
     private JsonNode send(MockHttpServletRequestBuilder request, String token, String body, int expectedStatus) throws Exception {
         String response = mvc.perform(request.header(AUTHORIZATION, token)

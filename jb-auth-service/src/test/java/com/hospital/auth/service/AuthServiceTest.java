@@ -5,6 +5,7 @@ import com.hospital.auth.dto.LoginResponse;
 import com.hospital.auth.dto.StaffSummary;
 import com.hospital.auth.dto.UserRegisterRequest;
 import com.hospital.auth.exception.InvalidCredentialsException;
+import com.hospital.auth.model.RefreshToken;
 import com.hospital.auth.model.UserAccount;
 import com.hospital.auth.repository.UserAccountRepository;
 import com.hospital.auth.support.TestJwt;
@@ -32,11 +33,12 @@ class AuthServiceTest {
     private final UserAccountRepository users = mock(UserAccountRepository.class);
     private final PasswordEncoder encoder = new BCryptPasswordEncoder(4); // low cost: fast tests, same algorithm
     private final JwtTokenProvider tokens = new JwtTokenProvider(TestJwt.SECRET, 3_600_000);
+    private final RefreshTokenService refreshTokens = mock(RefreshTokenService.class);
     private AuthService service;
 
     @BeforeEach
     void setUp() {
-        service = new AuthService(users, encoder, tokens);
+        service = new AuthService(users, encoder, tokens, refreshTokens);
         when(users.save(any(UserAccount.class))).thenAnswer(inv -> inv.getArgument(0));
     }
 
@@ -46,9 +48,14 @@ class AuthServiceTest {
 
         @Test
         void issuesATokenCarryingTheUsernameRoleAndName() {
-            when(users.findByUsername("doctor")).thenReturn(Optional.of(account("doctor", "DOCTOR", "Demo@1234", true)));
+            UserAccount doctor = account("doctor", "DOCTOR", "Demo@1234", true);
+            when(users.findByUsername("doctor")).thenReturn(Optional.of(doctor));
+            when(refreshTokens.startSession(doctor, "ua")).thenReturn(issued("raw-refresh", doctor));
 
-            LoginResponse response = service.authenticateUser(new LoginRequest(" doctor ", "Demo@1234"));
+            AuthService.LoginResult result = service.authenticateUser(new LoginRequest(" doctor ", "Demo@1234"), "ua");
+            LoginResponse response = result.response();
+
+            assertThat(result.refreshToken()).isEqualTo("raw-refresh");
 
             assertThat(response.tokenType()).isEqualTo("Bearer");
             assertThat(response.role()).isEqualTo("DOCTOR");
@@ -69,10 +76,36 @@ class AuthServiceTest {
                     new LoginRequest("doctor", "wrong-password"),
                     new LoginRequest("retired", "Demo@1234"),
                     new LoginRequest("nobody", "Demo@1234"))) {
-                assertThatThrownBy(() -> service.authenticateUser(attempt))
+                assertThatThrownBy(() -> service.authenticateUser(attempt, "ua"))
                         .isInstanceOf(InvalidCredentialsException.class)
                         .hasMessage("Invalid username or password.");
             }
+            verifyNoInteractions(refreshTokens);   // no session row for a failed login
+        }
+    }
+
+    @Nested
+    @DisplayName("refresh")
+    class Refresh {
+
+        @Test
+        void rotatesTheRefreshTokenAndMintsANewAccessTokenForItsOwner() {
+            UserAccount nurse = account("nurse", "NURSE", "x", true);
+            when(refreshTokens.rotate("old-raw", "ua")).thenReturn(issued("new-raw", nurse));
+
+            AuthService.LoginResult result = service.refresh("old-raw", "ua");
+
+            assertThat(result.refreshToken()).isEqualTo("new-raw");
+            assertThat(result.response().username()).isEqualTo("nurse");
+            assertThat(tokens.parse(result.response().accessToken()).get("roles", String.class)).isEqualTo("NURSE");
+        }
+
+        @Test
+        void aRejectedRefreshTokenPropagatesAsInvalidCredentials() {
+            when(refreshTokens.rotate("stolen", "ua")).thenThrow(new InvalidCredentialsException("Session expired."));
+
+            assertThatThrownBy(() -> service.refresh("stolen", "ua"))
+                    .isInstanceOf(InvalidCredentialsException.class);
         }
     }
 
@@ -154,6 +187,12 @@ class AuthServiceTest {
         u.setPassword(encoder.encode(rawPassword));
         u.setEnabled(enabled);
         return u;
+    }
+
+    private static RefreshTokenService.Issued issued(String raw, UserAccount owner) {
+        RefreshToken token = new RefreshToken();
+        token.setUser(owner);
+        return new RefreshTokenService.Issued(raw, token);
     }
 
     private static UserRegisterRequest request(String username, String email) {

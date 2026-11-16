@@ -1,7 +1,11 @@
 package com.hospital.opd.service;
 
+import com.hospital.opd.config.CacheConfig;
 import com.hospital.opd.dto.StaffSummary;
 import com.hospital.opd.exception.DownstreamServiceException;
+import io.github.resilience4j.bulkhead.annotation.Bulkhead;
+import io.github.resilience4j.circuitbreaker.annotation.CircuitBreaker;
+import org.springframework.cache.annotation.Cacheable;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.web.reactive.function.client.WebClient;
@@ -23,7 +27,13 @@ public class DoctorIntegrationService {
         this.internalAuthWebClient = internalAuthWebClient;
     }
 
-    /** Returns the doctor's profile, or 400 if the username is not an active doctor. */
+    /**
+     * Returns the doctor's profile, or 400 if the username is not an active doctor.
+     * Successful lookups are cached for 5 minutes (exceptions are never cached).
+     */
+    @Cacheable(cacheNames = CacheConfig.DOCTORS, key = "#username")
+    @Bulkhead(name = "auth")
+    @CircuitBreaker(name = "auth")
     public StaffSummary requireDoctor(String username) {
         StaffSummary staff;
         try {

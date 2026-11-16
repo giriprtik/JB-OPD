@@ -3,13 +3,19 @@ package com.hospital.opd.service;
 import com.hospital.opd.dto.StaffSummary;
 import com.hospital.opd.dto.VisitQueueItem;
 import com.hospital.opd.dto.VisitRegistrationRequest;
+import com.hospital.opd.crypto.FieldCipher;
+import com.hospital.opd.event.VisitChanged;
 import com.hospital.opd.exception.ResourceNotFoundException;
 import com.hospital.opd.model.*;
+import com.hospital.opd.outbox.LabOrderPayload;
+import com.hospital.opd.outbox.OutboxService;
 import com.hospital.opd.repository.*;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.time.LocalDate;
@@ -18,41 +24,61 @@ import java.util.Collection;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 
 @Service
 public class VisitService {
 
     public static final ZoneId HOSPITAL_ZONE = ZoneId.of("Asia/Kathmandu");
+    private static final Set<VisitStatus> SENDABLE_TO_LAB = EnumSet.of(VisitStatus.TRIAGED, VisitStatus.IN_CONSULTATION);
 
     private final VisitRepository visitRepository;
     private final PatientRepository patientRepository;
-    private final TokenCounterRepository tokenCounterRepository;
+    private final TokenIssuer tokenIssuer;
     private final VisitEventRepository visitEventRepository;
     private final DoctorIntegrationService doctorIntegrationService;
-    private final LabIntegrationService labIntegrationService;
+    private final OutboxService outboxService;
+    private final ApplicationEventPublisher events;
+    private final FieldCipher cipher;
+    private final TransactionTemplate tx;
 
     public VisitService(VisitRepository visitRepository,
                         PatientRepository patientRepository,
-                        TokenCounterRepository tokenCounterRepository,
+                        TokenIssuer tokenIssuer,
                         VisitEventRepository visitEventRepository,
                         DoctorIntegrationService doctorIntegrationService,
-                        LabIntegrationService labIntegrationService) {
+                        OutboxService outboxService,
+                        ApplicationEventPublisher events,
+                        FieldCipher cipher,
+                        TransactionTemplate tx) {
         this.visitRepository = visitRepository;
         this.patientRepository = patientRepository;
-        this.tokenCounterRepository = tokenCounterRepository;
+        this.tokenIssuer = tokenIssuer;
         this.visitEventRepository = visitEventRepository;
         this.doctorIntegrationService = doctorIntegrationService;
-        this.labIntegrationService = labIntegrationService;
+        this.outboxService = outboxService;
+        this.events = events;
+        this.cipher = cipher;
+        this.tx = tx;
     }
 
-    /** Returning patient: open a new visit by MRN. */
-    @Transactional
+    /**
+     * Returning patient: open a new visit by MRN.
+     * The doctor lookup (HTTP to auth, cached) happens BEFORE the transaction, so no DB connection sits idle
+     * while auth answers. Not @Transactional for that reason; the write part runs in the TransactionTemplate.
+     */
     public VisitQueueItem registerVisit(VisitRegistrationRequest request, String registrar) {
-        Patient patient = patientRepository.findByMrn(request.patientMrn().trim())
-                .orElseThrow(() -> new ResourceNotFoundException("No patient found with MRN " + request.patientMrn()));
+        String mrn = request.patientMrn().trim();
+        requirePatient(mrn);   // unknown MRN fails fast, before any call to the auth service
         StaffSummary doctor = doctorIntegrationService.requireDoctor(request.assignedDoctorUsername().trim());
-        Visit visit = openVisit(patient, request.chiefComplaint(), request.priority(), doctor, registrar);
-        return queueItem(visit.getId());
+        Long visitId = tx.execute(status ->
+                openVisit(requirePatient(mrn), request.chiefComplaint(), request.priority(), doctor, registrar).getId());
+        return queueItem(visitId);
+    }
+
+    private Patient requirePatient(String mrn) {
+        return patientRepository.findByMrn(mrn)
+                .orElseThrow(() -> new ResourceNotFoundException("No patient found with MRN " + mrn));
     }
 
     /**
@@ -68,8 +94,7 @@ public class VisitService {
         }
 
         LocalDate today = LocalDate.now(HOSPITAL_ZONE);
-        tokenCounterRepository.incrementAtomicToken(today);   // INSERT ... ON CONFLICT DO UPDATE: row-locked, race-free
-        Integer token = tokenCounterRepository.getCurrentTokenValue(today);
+        int token = tokenIssuer.next(today);   // one INSERT ... ON CONFLICT ... RETURNING: row-locked, race-free
 
         Visit visit = new Visit();
         visit.setPatient(patient);
@@ -106,47 +131,52 @@ public class VisitService {
 
     @Transactional(readOnly = true)
     public List<VisitQueueItem> getDoctorQueue(String doctorUsername, Collection<VisitStatus> statuses) {
-        return visitRepository.findDoctorQueue(doctorUsername, statuses.stream().map(Enum::name).toList());
+        return visitRepository.findDoctorQueue(doctorUsername, statuses.stream().map(Enum::name).toList())
+                .stream().map(this::toItem).toList();
     }
 
-    /** Order the tests first; only flip the visit to AWAITING_LAB once the lab has accepted the order. */
-    @Transactional(propagation = Propagation.NOT_SUPPORTED) // never hold a DB transaction across the HTTP call
-    public void sendToLab(Long visitId, List<String> testCodes, String clinicalNotes,
-                          String doctor, String authorization) {
+    /**
+     * One local transaction: move the visit to AWAITING_LAB and queue the lab order in the outbox.
+     * No HTTP call here: the outbox relay delivers the order (with an idempotency key), so a slow or
+     * down lab never fails the doctor's click and can never leave an orphan or duplicate order.
+     * latest_lab_order_id stays null until the lab accepts the order ("queued for lab").
+     */
+    @Transactional
+    public void sendToLab(Long visitId, List<String> testCodes, String clinicalNotes, String doctor) {
         Visit visit = visitRepository.findWithPatient(visitId)
                 .orElseThrow(() -> new ResourceNotFoundException("Visit not found: " + visitId));
         requireAssignedDoctor(visit, doctor);
 
-        Set<VisitStatus> allowed = EnumSet.of(VisitStatus.TRIAGED, VisitStatus.IN_CONSULTATION);
-        if (!allowed.contains(visit.getStatus())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Visit is " + visit.getStatus() + "; cannot send to lab");
+        VisitStatus from = visit.getStatus();
+        if (!SENDABLE_TO_LAB.contains(from)) {
+            throw new ResponseStatusException(HttpStatus.CONFLICT, "Visit is " + from + "; cannot send to lab");
         }
 
         String history = clinicalNotes != null && !clinicalNotes.isBlank() ? clinicalNotes.trim() : visit.getChiefComplaint();
-        Long labOrderId = labIntegrationService.raiseLabInvestigationOrder(
-                visitId, visit.getPatient().getMrn(), visit.getPatient().getFullName(), testCodes, history, authorization);
+        UUID requestId = UUID.randomUUID();
 
-        int updated = visitRepository.markSentToLab(visitId, allowed, VisitStatus.AWAITING_LAB, labOrderId);
-        if (updated == 0) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Lab order created but the visit changed concurrently");
-        }
-        recordEvent(visitId, visit.getStatus(), VisitStatus.AWAITING_LAB, doctor,
-                "Lab order #" + labOrderId + ": " + String.join(", ", testCodes));
+        visit.setStatus(VisitStatus.AWAITING_LAB);   // @Version on Visit: a concurrent double-click fails with 409
+        visit.setLatestLabOrderId(null);
+        outboxService.enqueueLabOrder(new LabOrderPayload(requestId, visitId, visit.getPatient().getMrn(),
+                visit.getPatient().getFullName(), List.copyOf(testCodes), history, doctor));
+        recordEvent(visitId, from, VisitStatus.AWAITING_LAB, doctor,
+                "Lab order queued: " + String.join(", ", testCodes));
     }
 
     @Transactional(readOnly = true)
     public List<VisitQueueItem> getTriageQueue() {
-        return visitRepository.findTriageQueue();
+        return visitRepository.findTriageQueue().stream().map(this::toItem).toList();
     }
 
     @Transactional(readOnly = true)
     public List<VisitQueueItem> getTodaysVisits() {
-        return visitRepository.findTodaysVisits();
+        return visitRepository.findTodaysVisits().stream().map(this::toItem).toList();
     }
 
     @Transactional(readOnly = true)
     public VisitQueueItem queueItem(Long visitId) {
         return visitRepository.findQueueItem(visitId)
+                .map(this::toItem)
                 .orElseThrow(() -> new ResourceNotFoundException("Visit not found: " + visitId));
     }
 
@@ -155,8 +185,20 @@ public class VisitService {
         return visitEventRepository.findByVisitIdOrderByOccurredAtAsc(visitId);
     }
 
+    /** Audit row + a live-update event (delivered to open screens after the transaction commits). */
     public void recordEvent(Long visitId, VisitStatus from, VisitStatus to, String actor, String note) {
         visitEventRepository.save(new VisitEvent(visitId, from == null ? null : from.name(), to.name(), actor, note));
+        events.publishEvent(new VisitChanged(visitId, to.name()));
+    }
+
+    /** Native query rows skip JPA converters: decrypt the encrypted columns here. */
+    private VisitQueueItem toItem(VisitQueueRow r) {
+        return new VisitQueueItem(r.getVisitId(), r.getPatientMrn(), r.getPatientFullName(), r.getTokenNumber(),
+                cipher.decrypt(r.getChiefComplaint()), r.getPriority(), r.getStatus(), r.getPatientAge(),
+                r.getPatientGender(), r.getPatientBloodGroup(), cipher.decrypt(r.getPatientAllergies()),
+                r.getAssignedDoctorUsername(), r.getAssignedDoctorName(), r.getRegisteredTime(), r.getLabOrderId(),
+                r.getTemperatureCelsius(), r.getPulseRate(), r.getBloodPressure(), r.getOxygenSaturation(),
+                cipher.decrypt(r.getSymptomsBrief()));
     }
 
     /** Doctors may only act on their own patients. */

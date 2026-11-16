@@ -1,13 +1,7 @@
-import { AxiosError, AxiosHeaders, type InternalAxiosRequestConfig } from 'axios';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import api, { apiError, TOKEN_KEY, USER_KEY } from './api';
-
-function httpError(status: number, data: unknown, url = '/api/v1/opd/visits/today') {
-  const config = { url, headers: new AxiosHeaders() } as InternalAxiosRequestConfig;
-  return new AxiosError('Request failed', 'ERR_BAD_RESPONSE', config, {}, {
-    status, statusText: '', data, headers: {}, config,
-  });
-}
+import { AxiosError } from 'axios';
+import { describe, expect, it, vi } from 'vitest';
+import api, { apiError, getAccessToken, refreshAccessToken, registerSessionListener, setAccessToken } from './api';
+import { httpError, mockApi, session } from '../test/apiMock';
 
 describe('apiError', () => {
   it('prefers the problem+json detail', () => {
@@ -31,50 +25,100 @@ describe('apiError', () => {
 });
 
 describe('api client', () => {
-  const originalAdapter = api.defaults.adapter;
-  afterEach(() => { api.defaults.adapter = originalAdapter; });
+  const stubLocation = (pathname: string) => {
+    const assign = vi.fn();
+    vi.spyOn(window, 'location', 'get').mockReturnValue({ ...window.location, pathname, assign });
+    return assign;
+  };
 
-  it('sends the stored token as a Bearer header', async () => {
-    localStorage.setItem(TOKEN_KEY, 'abc.def.ghi');
-    const adapter = vi.fn(async (config: InternalAxiosRequestConfig) =>
-      ({ data: [], status: 200, statusText: 'OK', headers: {}, config }));
-    api.defaults.adapter = adapter;
+  it('sends the in-memory token as a Bearer header and never touches localStorage', async () => {
+    setAccessToken('abc.def.ghi');
+    const adapter = mockApi(() => ({ status: 200, data: [] }));
 
     await api.get('/api/v1/opd/visits/today');
 
     expect(adapter.mock.calls[0][0].headers.Authorization).toBe('Bearer abc.def.ghi');
+    expect(localStorage.length).toBe(0);
   });
 
-  it('signs the user out when a request comes back 401', async () => {
-    localStorage.setItem(TOKEN_KEY, 'expired');
-    localStorage.setItem(USER_KEY, '{"username":"nurse"}');
-    const assign = vi.fn();
-    vi.spyOn(window, 'location', 'get').mockReturnValue({ ...window.location, pathname: '/triage', assign });
-    api.defaults.adapter = async (config) => { throw httpError(401, {}, config.url); };
+  it('on a 401, refreshes once and replays the request with the new token', async () => {
+    setAccessToken('expired');
+    const adapter = mockApi((config) => {
+      if (config.url?.includes('/auth/refresh')) return { status: 200, data: session('NURSE', 'fresh-token') };
+      return config.headers.Authorization === 'Bearer fresh-token'
+        ? { status: 200, data: ['ok'] }
+        : { status: 401 };
+    });
+
+    const res = await api.get('/api/v1/opd/visits/today');
+
+    expect(res.data).toEqual(['ok']);
+    expect(getAccessToken()).toBe('fresh-token');
+    const refreshCall = adapter.mock.calls.find(([c]) => c.url?.includes('/auth/refresh'))![0];
+    expect(refreshCall.headers['X-JB-Refresh']).toBe('1');
+  });
+
+  it('parallel 401s share a single refresh call', async () => {
+    setAccessToken('expired');
+    const adapter = mockApi((config) => {
+      if (config.url?.includes('/auth/refresh')) return { status: 200, data: session('DOCTOR', 'fresh') };
+      return config.headers.Authorization === 'Bearer fresh' ? { status: 200, data: 1 } : { status: 401 };
+    });
+
+    await Promise.all([api.get('/a'), api.get('/b'), api.get('/c')]);
+
+    expect(adapter.mock.calls.filter(([c]) => c.url?.includes('/auth/refresh'))).toHaveLength(1);
+  });
+
+  it('signs the user out when the refresh fails too', async () => {
+    setAccessToken('expired');
+    const listener = vi.fn();
+    registerSessionListener(listener);
+    const assign = stubLocation('/triage');
+    mockApi(() => ({ status: 401 }));
 
     await expect(api.get('/api/v1/opd/visits/today')).rejects.toBeInstanceOf(AxiosError);
 
-    expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
-    expect(localStorage.getItem(USER_KEY)).toBeNull();
+    expect(getAccessToken()).toBeNull();
+    expect(listener).toHaveBeenCalledWith(null);
     expect(assign).toHaveBeenCalledWith('/login?expired=1');
+    registerSessionListener(null);
+  });
+
+  it('does not retry a request that already failed after a refresh', async () => {
+    setAccessToken('expired');
+    const adapter = mockApi((config) =>
+      config.url?.includes('/auth/refresh') ? { status: 200, data: session('NURSE') } : { status: 401 });
+    stubLocation('/triage');
+
+    await expect(api.get('/api/v1/opd/visits/today')).rejects.toBeInstanceOf(AxiosError);
+
+    // original + one replay, never a loop
+    expect(adapter.mock.calls.filter(([c]) => c.url === '/api/v1/opd/visits/today')).toHaveLength(2);
   });
 
   it('does not treat a failed login (401) as an expired session', async () => {
-    const assign = vi.fn();
-    vi.spyOn(window, 'location', 'get').mockReturnValue({ ...window.location, pathname: '/login', assign });
-    api.defaults.adapter = async (config) => { throw httpError(401, { detail: 'Invalid username or password.' }, config.url); };
+    const assign = stubLocation('/login');
+    const adapter = mockApi(() => ({ status: 401, data: { detail: 'Invalid username or password.' } }));
 
     await expect(api.post('/api/v1/auth/login', {})).rejects.toBeInstanceOf(AxiosError);
 
     expect(assign).not.toHaveBeenCalled();
+    expect(adapter).toHaveBeenCalledTimes(1);   // no refresh attempt
   });
 
   it('keeps the session on a 403', async () => {
-    localStorage.setItem(TOKEN_KEY, 'still-valid');
-    api.defaults.adapter = async (config) => { throw httpError(403, { detail: 'Your role is not allowed to do this.' }, config.url); };
+    setAccessToken('still-valid');
+    mockApi(() => ({ status: 403, data: { detail: 'Your role is not allowed to do this.' } }));
 
     await expect(api.get('/api/v1/opd/patients')).rejects.toBeInstanceOf(AxiosError);
 
-    expect(localStorage.getItem(TOKEN_KEY)).toBe('still-valid');
+    expect(getAccessToken()).toBe('still-valid');
+  });
+
+  it('refreshAccessToken resolves null without a refresh cookie', async () => {
+    mockApi(() => ({ status: 401 }));
+
+    await expect(refreshAccessToken()).resolves.toBeNull();
   });
 });

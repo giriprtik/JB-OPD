@@ -12,6 +12,7 @@ import org.springframework.data.domain.PageRequest;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.server.ResponseStatusException;
 
 import java.util.List;
@@ -26,28 +27,45 @@ public class PatientService {
     private final VisitRepository visitRepository;
     private final VisitService visitService;
     private final DoctorIntegrationService doctorIntegrationService;
+    private final TransactionTemplate tx;
 
     public PatientService(PatientRepository patientRepository,
                           VisitRepository visitRepository,
                           VisitService visitService,
-                          DoctorIntegrationService doctorIntegrationService) {
+                          DoctorIntegrationService doctorIntegrationService,
+                          TransactionTemplate tx) {
         this.patientRepository = patientRepository;
         this.visitRepository = visitRepository;
         this.visitService = visitService;
         this.doctorIntegrationService = doctorIntegrationService;
+        this.tx = tx;
     }
 
-    /** New patient: creates the master record and opens their first visit in one transaction. */
-    @Transactional
+    /**
+     * New patient: creates the master record and opens their first visit in one transaction.
+     * The doctor lookup (HTTP to auth, cached) runs BEFORE the transaction starts, so no DB connection is
+     * held while waiting on another service.
+     */
     public PatientResponse registerPatient(PatientRegisterRequest request, String registrar) {
         String phone = request.getPhone().trim();
+        rejectDuplicatePhone(phone);   // cheap, and spares the auth call for the common duplicate case
+        StaffSummary doctor = doctorIntegrationService.requireDoctor(request.getAssignedDoctorUsername().trim());
+        return tx.execute(status -> {
+            rejectDuplicatePhone(phone);   // again inside the transaction, in case another desk just added it
+            return createPatientWithVisit(request, phone, doctor, registrar);
+        });
+    }
+
+    private void rejectDuplicatePhone(String phone) {
         patientRepository.findFirstByPhone(phone).ifPresent(existing -> {
             throw new ResponseStatusException(HttpStatus.CONFLICT,
                     "A patient with phone " + phone + " is already registered as " + existing.getFullName()
                     + " (" + existing.getMrn() + "). Use 'Returning patient' to open a new visit.");
         });
+    }
 
-        StaffSummary doctor = doctorIntegrationService.requireDoctor(request.getAssignedDoctorUsername().trim());
+    private PatientResponse createPatientWithVisit(PatientRegisterRequest request, String phone,
+                                                   StaffSummary doctor, String registrar) {
 
         Patient patient = new Patient();
         patient.setMrn(String.format("JB-%06d", patientRepository.getNextMrnSequenceValue()));

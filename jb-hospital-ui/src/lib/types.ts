@@ -37,12 +37,22 @@ export interface QueueItem {
   assignedDoctorUsername?: string | null;
   assignedDoctorName?: string | null;
   registeredTime?: string | null;
-  diagnosis?: string | null;
+  /** Null while a lab order is queued for delivery to the lab, or when none was placed. */
+  labOrderId?: number | null;
   temperatureCelsius?: number | null;
   pulseRate?: number | null;
   bloodPressure?: string | null;
   oxygenSaturation?: number | null;
   symptomsBrief?: string | null;
+}
+
+/** Diagnosis and notes: only the assigned doctor (or a break-glass grant) can load these. */
+export interface VisitClinicalView {
+  visitId: number;
+  status: VisitStatus;
+  diagnosis?: string | null;
+  consultationNotes?: string | null;
+  completedAt?: string | null;
 }
 
 export interface PatientSummary {

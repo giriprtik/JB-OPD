@@ -2,13 +2,15 @@ import { useNavigate } from 'react-router-dom';
 import { ChevronRight, HeartPulse, RefreshCw } from 'lucide-react';
 import { OpdApi } from '../../lib/services';
 import { usePolling } from '../../hooks/usePolling';
+import { useQueueStream } from '../../hooks/useQueueStream';
 import { useFlash } from '../../hooks/useFlash';
 import { ageSex } from '../../lib/format';
 import { Alert, Button, Card, CardHeader, EmptyState, PageHeader, PriorityBadge, Spinner, Token, cx } from '../../components/ui';
 
 export default function TriageQueue() {
   const navigate = useNavigate();
-  const q = usePolling(() => OpdApi.triageQueue(), [], 15000);
+  const q = usePolling(() => OpdApi.triageQueue(), [], 60000);   // fallback; SSE drives updates
+  useQueueStream(q.reload);
   const [flash, clearFlash] = useFlash();
 
   return (

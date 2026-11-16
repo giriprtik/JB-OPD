@@ -15,6 +15,7 @@ import com.lowagie.text.Phrase;
 import com.lowagie.text.pdf.PdfPCell;
 import com.lowagie.text.pdf.PdfPTable;
 import com.lowagie.text.pdf.PdfWriter;
+import io.github.resilience4j.bulkhead.annotation.Bulkhead;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
@@ -58,6 +59,8 @@ public class LabReportPdfService {
         this.hospitalName = hospitalName;
     }
 
+    /** Bulkhead: at most a few renders at once, so a print rush can't starve the registration desk of CPU. */
+    @Bulkhead(name = "pdf")
     public byte[] render(Visit visit, Patient patient, VisitLabResults lab) {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
         Document doc = new Document(PageSize.A4, 40, 40, 40, 40);

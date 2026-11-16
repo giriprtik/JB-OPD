@@ -37,6 +37,14 @@ log "Signed in as nurse"
 DOCTOR=$(login doctor);   [[ -n "$DOCTOR" ]]  || fail "doctor login"
 LABTECH=$(login labtech); [[ -n "$LABTECH" ]] || fail "labtech login"
 
+log "Waiting for OPD and Lab services to be ready"
+until [[ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $NURSE" "$BASE/api/v1/opd/visits/triage-queue")" == "200" ]] \
+   && [[ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $DOCTOR" "$BASE/api/v1/lab/tests")" == "200" ]]; do
+  (( $(date +%s) < deadline )) || fail "OPD or Lab service did not become ready in ${TIMEOUT_S}s"
+  sleep 5
+done
+log "All backend services ready"
+
 log "Role checks through the gateway"
 expect_status 200 GET  /api/v1/auth/doctors              "$NURSE"
 expect_status 200 GET  /api/v1/opd/visits/triage-queue   "$NURSE"
@@ -46,6 +54,20 @@ expect_status 200 GET  /api/v1/lab/tests                 "$DOCTOR"
 expect_status 200 GET  /api/v1/lab/orders/queue          "$LABTECH"
 expect_status 403 POST /api/v1/lab/orders                "$LABTECH" '{"visitId":1,"patientMrn":"JB-000001","testCodes":["CBC"]}'
 expect_status 401 GET  /api/v1/opd/visits/today          "not-a-token"
+
+expect_status 403 GET  "/api/v1/lab/orders?ids=1"       "$DOCTOR"   # doctors read lab data only via OPD
+
+log "Refresh cookie: login sets it, refresh rotates it, logout ends it"
+JAR=$(mktemp)
+curl -fsS -c "$JAR" -X POST "$BASE/api/v1/auth/login" -H 'Content-Type: application/json' \
+  -d '{"username":"nurse","password":"Demo@1234"}' -o /dev/null || fail "login with cookie jar"
+grep -q jb_rt "$JAR" || fail "login did not set the jb_rt cookie"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -c "$JAR" -X POST "$BASE/api/v1/auth/refresh" -H 'X-JB-Refresh: 1')
+[[ "$code" == "200" ]] || fail "refresh returned $code"
+code=$(curl -s -o /dev/null -w '%{http_code}' -b "$JAR" -X POST "$BASE/api/v1/auth/logout")
+[[ "$code" == "204" ]] || fail "logout returned $code"
+rm -f "$JAR"
+echo "  POST   /api/v1/auth/{login,refresh,logout}       ok"
 
 log "Registering a patient end to end (OPD -> auth doctor lookup)"
 PHONE="98$(date +%s | tail -c 9)"

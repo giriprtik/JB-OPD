@@ -1,6 +1,5 @@
 package com.hospital.opd.repository;
 
-import com.hospital.opd.dto.VisitQueueItem;
 import com.hospital.opd.model.Visit;
 import com.hospital.opd.model.VisitStatus;
 import org.springframework.data.jpa.repository.JpaRepository;
@@ -15,7 +14,7 @@ import java.util.Optional;
 
 public interface VisitRepository extends JpaRepository<Visit, Long> {
 
-    /** Shared projection for all worklists. Column aliases must match VisitQueueItem getters. */
+    /** Shared projection for all worklists. Column aliases must match VisitQueueRow getters. */
     String QUEUE_SELECT =
         "SELECT v.id AS visitId, p.mrn AS patientMrn, p.full_name AS patientFullName, " +
         "  v.token_number AS tokenNumber, v.chief_complaint AS chiefComplaint, " +
@@ -24,7 +23,7 @@ public interface VisitRepository extends JpaRepository<Visit, Long> {
         "  p.gender AS patientGender, p.blood_group AS patientBloodGroup, p.allergies AS patientAllergies, " +
         "  v.assigned_doctor_username AS assignedDoctorUsername, v.assigned_doctor_name AS assignedDoctorName, " +
         "  to_char(v.registered_at AT TIME ZONE 'Asia/Kathmandu', 'HH24:MI') AS registeredTime, " +
-        "  v.diagnosis AS diagnosis, " +
+        "  v.latest_lab_order_id AS labOrderId, " +   // no diagnosis/notes here: queues are nurse-visible
         "  vs.temperature_celsius AS temperatureCelsius, vs.pulse_rate AS pulseRate, " +
         "  vs.blood_pressure AS bloodPressure, vs.oxygen_saturation AS oxygenSaturation, " +
         "  vs.symptoms_brief AS symptomsBrief " +
@@ -47,34 +46,48 @@ public interface VisitRepository extends JpaRepository<Visit, Long> {
     @Query(value = QUEUE_SELECT +
            "WHERE v.assigned_doctor_username = :doctor AND v.status IN (:statuses) " +
            "ORDER BY " + PRIORITY_ORDER + ", v.visit_date, v.token_number", nativeQuery = true)
-    List<VisitQueueItem> findDoctorQueue(@Param("doctor") String doctorUsername,
+    List<VisitQueueRow> findDoctorQueue(@Param("doctor") String doctorUsername,
                                          @Param("statuses") Collection<String> statuses);
 
     /** Triage worklist: everyone waiting for vitals, emergencies first. */
     @Query(value = QUEUE_SELECT +
            "WHERE v.status = 'REGISTERED' " +
            "ORDER BY " + PRIORITY_ORDER + ", v.visit_date, v.token_number", nativeQuery = true)
-    List<VisitQueueItem> findTriageQueue();
+    List<VisitQueueRow> findTriageQueue();
 
     /** Every visit opened today (Kathmandu time), by token. */
     @Query(value = QUEUE_SELECT + "WHERE " + TODAY_FILTER + " ORDER BY v.token_number", nativeQuery = true)
-    List<VisitQueueItem> findTodaysVisits();
+    List<VisitQueueRow> findTodaysVisits();
 
     @Query(value = QUEUE_SELECT + "WHERE v.id = :id", nativeQuery = true)
-    Optional<VisitQueueItem> findQueueItem(@Param("id") Long id);
+    Optional<VisitQueueRow> findQueueItem(@Param("id") Long id);
 
     @Query("select v from Visit v join fetch v.patient where v.id = :id")
     Optional<Visit> findWithPatient(@Param("id") Long id);
 
     List<Visit> findByStatusAndLatestLabOrderIdIsNotNull(VisitStatus status);
 
+    @Query("select new com.hospital.opd.repository.VisitAccessView(v.assignedDoctorUsername, v.status) "
+         + "from Visit v where v.id = :id")
+    Optional<VisitAccessView> findAccessView(@Param("id") Long id);
+
+    /** Who the visit is assigned to, for routing live queue events to the right doctor's screen. */
+    @Query("select v.assignedDoctorUsername from Visit v where v.id = :id")
+    Optional<String> findAssignedDoctorUsername(@Param("id") Long id);
+
+    /** The lab accepted a queued order: record its id, only if the visit is still waiting for it. */
     @Modifying(clearAutomatically = true)
     @Transactional
-    @Query("update Visit v set v.status = :to, v.latestLabOrderId = :orderId where v.id = :id and v.status in :from")
-    int markSentToLab(@Param("id") Long id,
-                      @Param("from") Collection<VisitStatus> from,
-                      @Param("to") VisitStatus to,
-                      @Param("orderId") Long orderId);
+    @Query("update Visit v set v.latestLabOrderId = :orderId "
+         + "where v.id = :id and v.status = com.hospital.opd.model.VisitStatus.AWAITING_LAB and v.latestLabOrderId is null")
+    int attachLabOrder(@Param("id") Long id, @Param("orderId") Long orderId);
+
+    /** A queued lab order could not be delivered: hand the visit back to the doctor. */
+    @Modifying(clearAutomatically = true)
+    @Transactional
+    @Query("update Visit v set v.status = com.hospital.opd.model.VisitStatus.IN_CONSULTATION "
+         + "where v.id = :id and v.status = com.hospital.opd.model.VisitStatus.AWAITING_LAB and v.latestLabOrderId is null")
+    int returnUndeliveredLabOrder(@Param("id") Long id);
 
     @Modifying(clearAutomatically = true)
     @Transactional

@@ -12,6 +12,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static com.hospital.lab.support.TestJwt.*;
@@ -31,6 +32,7 @@ class LabWorkflowIT extends PostgresIntegrationTest {
     private static final String DOCTOR = bearer("doctor", "DOCTOR");
     private static final String LABTECH = bearer("labtech", "LABTECH");
     private static final String NURSE = bearer("nurse", "NURSE");
+    private static final String SYSTEM = bearer("svc:jb-opd-service", "SYSTEM");
     private static final AtomicLong VISITS = new AtomicLong(1000);
 
     @Autowired MockMvc mvc;
@@ -70,15 +72,22 @@ class LabWorkflowIT extends PostgresIntegrationTest {
                 .andExpect(status().is2xxSuccessful())
                 .andExpect(jsonPath("$", hasSize(2)));
 
-        mvc.perform(get("/api/v1/lab/orders").param("ids", String.valueOf(orderId)).header(AUTHORIZATION, DOCTOR))
+        // OPD reads completion and results with its service token (after its own assigned-doctor check).
+        mvc.perform(get("/api/v1/lab/orders").param("ids", String.valueOf(orderId)).header(AUTHORIZATION, SYSTEM))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].orderStatus").value("COMPLETED"));
 
-        mvc.perform(get("/api/v1/lab/results/order/{id}", orderId).header(AUTHORIZATION, DOCTOR))
+        mvc.perform(get("/api/v1/lab/results/order/{id}", orderId).header(AUTHORIZATION, SYSTEM))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[?(@.parameterName == 'Hemoglobin')].abnormal").value(hasItem(true)))
                 .andExpect(jsonPath("$[?(@.parameterName == 'Hemoglobin')].referenceRange").value(hasItem("12 - 17.5 g/dL")))
                 .andExpect(jsonPath("$[?(@.parameterName == 'Fasting Glucose')].abnormal").value(hasItem(false)));
+
+        // Results and the doctor's clinical history are ciphertext at rest (AES-GCM), plain text through the API.
+        assertThat(jdbc.queryForList("SELECT observed_value FROM lab_results WHERE order_id = ?", String.class, orderId))
+                .isNotEmpty().allSatisfy(v -> assertThat(v).startsWith("enc:k1:"));
+        assertThat(jdbc.queryForObject("SELECT clinical_history FROM lab_orders WHERE id = ?", String.class, orderId))
+                .startsWith("enc:k1:").doesNotContain("Fever");
 
         // A completed order is off the worklist and cannot be resulted again.
         mvc.perform(get("/api/v1/lab/orders/queue").header(AUTHORIZATION, LABTECH))
@@ -134,6 +143,52 @@ class LabWorkflowIT extends PostgresIntegrationTest {
         long orderId = placeOrder("CBC");
         mvc.perform(post("/api/v1/lab/orders/{id}/tests/{code}/collect", orderId, "CBC").header(AUTHORIZATION, DOCTOR))
                 .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void doctorsCannotReadLabDataDirectlyOnlyThroughOpd() throws Exception {
+        long orderId = placeOrder("CBC");
+
+        mvc.perform(get("/api/v1/lab/orders").param("ids", String.valueOf(orderId)).header(AUTHORIZATION, DOCTOR))
+                .andExpect(status().isForbidden());
+        mvc.perform(get("/api/v1/lab/results/order/{id}", orderId).header(AUTHORIZATION, DOCTOR))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void opdsBackgroundServiceTokenCanLookUpOrders() throws Exception {
+        long orderId = placeOrder("CBC");
+
+        mvc.perform(get("/api/v1/lab/orders").param("ids", String.valueOf(orderId)).header(AUTHORIZATION, SYSTEM))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$[0].id").value((int) orderId));
+    }
+
+    // ---------------------------------------------------------------- idempotent creation (OPD outbox)
+
+    @Test
+    void theSameRequestIdAlwaysMapsToTheSameOrder() throws Exception {
+        String body = orderWithKey(UUID.randomUUID(), "doctor", "CBC");
+
+        JsonNode first = send(post("/api/v1/lab/orders"), SYSTEM, body, 201);
+        JsonNode second = send(post("/api/v1/lab/orders"), SYSTEM, body, 200);
+
+        assertThat(second.get("id").asLong()).isEqualTo(first.get("id").asLong());
+        assertThat(first.get("orderedByDoctor").asText()).isEqualTo("doctor");
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM lab_orders WHERE id = ?", Integer.class,
+                first.get("id").asLong())).isEqualTo(1);
+    }
+
+    @Test
+    void aServiceCallMustSayWhichDoctorOrdered() throws Exception {
+        send(post("/api/v1/lab/orders"), SYSTEM, orderWithKey(UUID.randomUUID(), "", "CBC"), 400);
+    }
+
+    @Test
+    void aDoctorTokenCannotPretendToBeAnotherDoctor() throws Exception {
+        JsonNode created = send(post("/api/v1/lab/orders"), DOCTOR, orderWithKey(UUID.randomUUID(), "drkarki", "CBC"), 201);
+
+        assertThat(created.get("orderedByDoctor").asText()).isEqualTo("doctor");   // body value ignored
     }
 
     @Test
@@ -196,6 +251,13 @@ class LabWorkflowIT extends PostgresIntegrationTest {
                 {"visitId": %d, "patientMrn": "JB-000007", "patientName": "Ram Bahadur",
                  "testCodes": ["%s"], "clinicalHistory": "Fever for two days"}
                 """.formatted(VISITS.incrementAndGet(), String.join("\", \"", tests));
+    }
+
+    private static String orderWithKey(UUID requestId, String orderedByDoctor, String... tests) {
+        return """
+                {"requestId": "%s", "orderedByDoctor": "%s", "visitId": %d, "patientMrn": "JB-000007",
+                 "patientName": "Ram Bahadur", "testCodes": ["%s"], "clinicalHistory": "Fever"}
+                """.formatted(requestId, orderedByDoctor, VISITS.incrementAndGet(), String.join("\", \"", tests));
     }
 
     private static String results() {

@@ -67,7 +67,10 @@ services:
       auth-postgres-db: { condition: service_healthy }
     environment:
       <<: [*jwt, *internal]
-      APP_JWT_EXPIRATION_MS: ${APP_JWT_EXPIRATION_MS:-28800000}   # 8-hour shift
+      APP_JWT_EXPIRATION_MS: ${APP_JWT_EXPIRATION_MS:-900000}     # 15-min access token
+      APP_REFRESH_IDLE_TTL: ${APP_REFRESH_IDLE_TTL:-PT2H}
+      APP_REFRESH_SESSION_TTL: ${APP_REFRESH_SESSION_TTL:-PT12H}  # one shift
+      APP_REFRESH_COOKIE_SECURE: ${APP_REFRESH_COOKIE_SECURE:-true}
       APP_SEED_DEMO_USERS: ${APP_SEED_DEMO_USERS:-true}
       APP_SEED_DEMO_PASSWORD: ${APP_SEED_DEMO_PASSWORD:-Demo@1234}
       SPRING_DATASOURCE_URL: jdbc:postgresql://auth-postgres-db:5432/auth_records_db
@@ -90,6 +93,12 @@ services:
       SPRING_DATASOURCE_PASSWORD: ${OPD_DB_PASSWORD:-opd_secure_password}
       AUTH_SERVICE_URL: http://jb-auth-api:8081
       LAB_SERVICE_URL: http://jb-lab-service:8083
+      # Field encryption for clinical text. Demo key only: set OPD_CRYPTO_KEYS in .env for anything real.
+      APP_CRYPTO_KEYS: ${OPD_CRYPTO_KEYS:-k1:A+vkvKPQQopGxbl9ip6g+j/+exHp7TwaxqUBsn9SfFg=}
+      APP_CRYPTO_ACTIVE_KEY: ${OPD_CRYPTO_ACTIVE_KEY:-k1}
+      # Migrating an existing database: run once with both set to true, then back to false.
+      APP_CRYPTO_ALLOW_PLAINTEXT: ${OPD_CRYPTO_ALLOW_PLAINTEXT:-false}
+      APP_CRYPTO_BACKFILL: ${OPD_CRYPTO_BACKFILL:-false}
     networks: [jb-network]
     restart: unless-stopped
 
@@ -101,6 +110,12 @@ services:
       lab-postgres-db: { condition: service_healthy }
     environment:
       <<: *jwt
+      # Field encryption for clinical text. Demo key only: set LAB_CRYPTO_KEYS in .env for anything real.
+      APP_CRYPTO_KEYS: ${LAB_CRYPTO_KEYS:-k1:WR9/b0qZdFTWSBXxSjIHKT1qTrc87jbI4ljHVHtOmqI=}
+      APP_CRYPTO_ACTIVE_KEY: ${LAB_CRYPTO_ACTIVE_KEY:-k1}
+      # Migrating an existing database: run once with both set to true, then back to false.
+      APP_CRYPTO_ALLOW_PLAINTEXT: ${LAB_CRYPTO_ALLOW_PLAINTEXT:-false}
+      APP_CRYPTO_BACKFILL: ${LAB_CRYPTO_BACKFILL:-false}
       SPRING_DATASOURCE_URL: jdbc:postgresql://lab-postgres-db:5432/lab_clinical_db
       SPRING_DATASOURCE_USERNAME: lab_admin
       SPRING_DATASOURCE_PASSWORD: ${LAB_DB_PASSWORD:-lab_secure_password}

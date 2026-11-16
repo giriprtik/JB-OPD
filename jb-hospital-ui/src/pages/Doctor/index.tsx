@@ -3,6 +3,7 @@ import { FlaskConical, RefreshCw, Stethoscope, UserRound } from 'lucide-react';
 import { OpdApi } from '../../lib/services';
 import { apiError } from '../../lib/api';
 import { usePolling } from '../../hooks/usePolling';
+import { useQueueStream } from '../../hooks/useQueueStream';
 import { useAuth } from '../../context/AuthContext';
 import { ageSex } from '../../lib/format';
 import type { QueueItem, VisitStatus } from '../../lib/types';
@@ -22,12 +23,16 @@ export default function DoctorWorkspace() {
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [openError, setOpenError] = useState<string | null>(null);
 
-  // Pull finished lab orders first so those visits show as "Results ready", then load every tab in one go.
-  const q = usePolling(async () => {
+  // Lab completions are pulled by a server-side job now, so a poll is just one cheap query.
+  // Live updates arrive over SSE; the 60 s poll is only a fallback if the stream drops.
+  const q = usePolling(() => OpdApi.myQueue(TABS.flatMap((t) => t.statuses)), [], 60000);
+  useQueueStream(q.reload);
+
+  // Manual refresh also asks the lab straight away, for a doctor who doesn't want to wait for the sync job.
+  const refreshNow = async () => {
     await OpdApi.refreshLabStatuses().catch(() => undefined);
-    const all = await OpdApi.myQueue(TABS.flatMap((t) => t.statuses));
-    return all;
-  }, [], 20000);
+    q.reload();
+  };
 
   const byTab = (t: Tab) => (q.data ?? []).filter((i) => TABS.find((x) => x.id === t)!.statuses.includes(i.status));
   const list = byTab(tab);
@@ -50,7 +55,7 @@ export default function DoctorWorkspace() {
   return (
     <>
       <PageHeader title="My patients" subtitle={`${user?.fullName} · emergencies first, then by token`}
-        actions={<Button variant="secondary" size="sm" onClick={q.reload}
+        actions={<Button variant="secondary" size="sm" onClick={refreshNow}
           icon={<RefreshCw className={cx('size-4', q.refreshing && 'animate-spin')} />}>Refresh</Button>} />
 
       <div className="grid lg:grid-cols-[360px_minmax(0,1fr)] gap-6 items-start">
@@ -97,6 +102,9 @@ export default function DoctorWorkspace() {
                       <p className="text-xs text-ink-3 truncate mt-0.5">{ageSex(i.patientAge, i.patientGender)} · {i.chiefComplaint}</p>
                       <div className="mt-1.5 flex items-center gap-1.5">
                         <StatusBadge status={i.status} />
+                        {i.status === 'AWAITING_LAB' && (i.labOrderId
+                          ? <Badge>Order #{i.labOrderId}</Badge>
+                          : <Badge tone="amber">Queued for lab</Badge>)}
                         {i.patientAllergies && <Badge tone="red">Allergy</Badge>}
                       </div>
                     </div>

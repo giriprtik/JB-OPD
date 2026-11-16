@@ -3,30 +3,29 @@ package com.hospital.opd.dto;
 import java.math.BigDecimal;
 
 /**
- * Read model for every worklist (triage, doctor, today's register).
- * Spring Data native-query projection: each getter maps to a column alias in VisitRepository.QUEUE_SELECT.
+ * Read model for every worklist (triage, doctor, today's register). Built from VisitQueueRow with the
+ * encrypted columns decrypted. Carries no diagnosis or consultation notes: queues are visible to nurses.
+ *
+ * @param labOrderId null while a lab order is still queued for delivery, or when none was placed
  */
-public interface VisitQueueItem {
-    Long getVisitId();
-    String getPatientMrn();
-    String getPatientFullName();
-    Integer getTokenNumber();
-    String getChiefComplaint();
-    String getPriority();
-    String getStatus();
-    Integer getPatientAge();
-    String getPatientGender();
-    String getPatientBloodGroup();
-    String getPatientAllergies();
-    String getAssignedDoctorUsername();
-    String getAssignedDoctorName();
-    String getRegisteredTime();
-    String getDiagnosis();
-
-    // Latest vitals (null until triage)
-    BigDecimal getTemperatureCelsius();
-    Integer getPulseRate();
-    String getBloodPressure();
-    Integer getOxygenSaturation();
-    String getSymptomsBrief();
-}
+public record VisitQueueItem(
+        Long visitId,
+        String patientMrn,
+        String patientFullName,
+        Integer tokenNumber,
+        String chiefComplaint,
+        String priority,
+        String status,
+        Integer patientAge,
+        String patientGender,
+        String patientBloodGroup,
+        String patientAllergies,
+        String assignedDoctorUsername,
+        String assignedDoctorName,
+        String registeredTime,
+        Long labOrderId,
+        BigDecimal temperatureCelsius,
+        Integer pulseRate,
+        String bloodPressure,
+        Integer oxygenSaturation,
+        String symptomsBrief) {}

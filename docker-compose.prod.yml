@@ -1,0 +1,68 @@
+# Production overlay. Use together with the base file:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# Needs Docker Compose v2.24.4+ (for !reset). Every ${VAR:?} below MUST be set in /opt/jb/.env.
+
+services:
+  auth-postgres-db:
+    ports: !reset []                       # databases are never published to the host
+    environment:
+      POSTGRES_PASSWORD: ${AUTH_DB_PASSWORD:?set AUTH_DB_PASSWORD}
+  opd-postgres-db:
+    ports: !reset []
+    environment:
+      POSTGRES_PASSWORD: ${OPD_DB_PASSWORD:?set OPD_DB_PASSWORD}
+  lab-postgres-db:
+    ports: !reset []
+    environment:
+      POSTGRES_PASSWORD: ${LAB_DB_PASSWORD:?set LAB_DB_PASSWORD}
+
+  jb-auth-api:
+    image: ghcr.io/${GHCR_OWNER}/jb-auth-service:${IMAGE_TAG}
+    build: !reset null
+    environment:
+      APP_JWT_SECRET: ${APP_JWT_SECRET:?set APP_JWT_SECRET}
+      INTERNAL_SERVICES_SECRET: ${INTERNAL_SERVICES_SECRET:?set INTERNAL_SERVICES_SECRET}
+      SPRING_DATASOURCE_PASSWORD: ${AUTH_DB_PASSWORD:?set AUTH_DB_PASSWORD}
+      APP_SEED_DEMO_USERS: ${APP_SEED_DEMO_USERS:-false}
+      APP_REFRESH_COOKIE_SECURE: "true"    # the site is served over HTTPS by caddy below
+
+  jb-opd-service:
+    image: ghcr.io/${GHCR_OWNER}/jb-opd-service:${IMAGE_TAG}
+    build: !reset null
+    environment:
+      APP_JWT_SECRET: ${APP_JWT_SECRET:?set APP_JWT_SECRET}
+      INTERNAL_SERVICES_SECRET: ${INTERNAL_SERVICES_SECRET:?set INTERNAL_SERVICES_SECRET}
+      SPRING_DATASOURCE_PASSWORD: ${OPD_DB_PASSWORD:?set OPD_DB_PASSWORD}
+      APP_CRYPTO_KEYS: ${OPD_CRYPTO_KEYS:?set OPD_CRYPTO_KEYS}
+      APP_CRYPTO_ACTIVE_KEY: ${OPD_CRYPTO_ACTIVE_KEY:?set OPD_CRYPTO_ACTIVE_KEY}
+
+  jb-lab-service:
+    image: ghcr.io/${GHCR_OWNER}/jb-lab-service:${IMAGE_TAG}
+    build: !reset null
+    environment:
+      APP_JWT_SECRET: ${APP_JWT_SECRET:?set APP_JWT_SECRET}
+      SPRING_DATASOURCE_PASSWORD: ${LAB_DB_PASSWORD:?set LAB_DB_PASSWORD}
+      APP_CRYPTO_KEYS: ${LAB_CRYPTO_KEYS:?set LAB_CRYPTO_KEYS}
+      APP_CRYPTO_ACTIVE_KEY: ${LAB_CRYPTO_ACTIVE_KEY:?set LAB_CRYPTO_ACTIVE_KEY}
+
+  jb-gateway:
+    image: ghcr.io/${GHCR_OWNER}/jb-gateway:${IMAGE_TAG}
+    build: !reset null
+    ports: !reset []                       # reachable only through the UI's nginx
+
+  jb-hospital-ui:
+    image: ghcr.io/${GHCR_OWNER}/jb-hospital-ui:${IMAGE_TAG}
+    build: !reset null
+    ports: !reset []                       # reachable only through caddy
+
+  caddy:                                   # HTTPS with automatic certificates
+    image: caddy:2-alpine
+    command: caddy reverse-proxy --from ${PUBLIC_HOSTNAME:?set PUBLIC_HOSTNAME} --to jb-hospital-ui:80
+    ports: ["80:80", "443:443"]
+    volumes: [caddy_data:/data]
+    depends_on: [jb-hospital-ui]
+    networks: [jb-network]
+    restart: unless-stopped
+
+volumes:
+  caddy_data:

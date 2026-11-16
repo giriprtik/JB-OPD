@@ -1,15 +1,17 @@
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { describe, expect, it } from 'vitest';
 import { AuthProvider } from '../context/AuthContext';
-import { TOKEN_KEY, USER_KEY } from '../lib/api';
+import { getAccessToken } from '../lib/api';
 import type { Role } from '../lib/types';
-import { anHourAgo, fakeToken, inOneHour } from '../test/jwt';
+import { mockApi, session } from '../test/apiMock';
 import { RequireRole } from './RequireRole';
 
-function signIn(role: Role, exp = inOneHour()) {
-  localStorage.setItem(TOKEN_KEY, fakeToken({ sub: role.toLowerCase(), roles: role, exp }));
-  localStorage.setItem(USER_KEY, JSON.stringify({ username: role.toLowerCase(), fullName: 'Test User', role }));
+/** The browser holds a valid refresh cookie for this role: the bootstrap refresh succeeds. */
+function hasRefreshCookieFor(role: Role) {
+  mockApi((config) => (config.url?.includes('/auth/refresh')
+    ? { status: 200, data: session(role) }
+    : { status: 404 }));
 }
 
 function renderAt(path: string) {
@@ -29,34 +31,47 @@ function renderAt(path: string) {
 }
 
 describe('RequireRole', () => {
-  it('sends signed-out users to the login page', () => {
+  it('sends signed-out users to the login page', async () => {
     renderAt('/doctor');
-    expect(screen.getByText('login page')).toBeInTheDocument();
+    expect(await screen.findByText('login page')).toBeInTheDocument();
   });
 
-  it('lets the right role through', () => {
-    signIn('DOCTOR');
+  it('restores the session from the refresh cookie and lets the right role through', async () => {
+    hasRefreshCookieFor('DOCTOR');
     renderAt('/doctor');
-    expect(screen.getByText('doctor workspace')).toBeInTheDocument();
+    expect(await screen.findByText('doctor workspace')).toBeInTheDocument();
+    expect(getAccessToken()).toBe('access-DOCTOR');
   });
 
-  it('shows the forbidden page to other roles', () => {
-    signIn('NURSE');
+  it('shows the forbidden page to other roles', async () => {
+    hasRefreshCookieFor('NURSE');
     renderAt('/doctor');
-    expect(screen.getByText('forbidden page')).toBeInTheDocument();
+    expect(await screen.findByText('forbidden page')).toBeInTheDocument();
   });
 
-  it('does not restore a session whose token has expired, and clears it', () => {
-    signIn('DOCTOR', anHourAgo());
+  it('shows a loading state instead of bouncing to login while the session is being restored', async () => {
+    let answer: (reply: { status: number }) => void = () => {};
+    const adapter = mockApi(() => new Promise((resolve) => { answer = resolve; }));
     renderAt('/doctor');
-    expect(screen.getByText('login page')).toBeInTheDocument();
-    expect(localStorage.getItem(TOKEN_KEY)).toBeNull();
+    await waitFor(() => expect(adapter).toHaveBeenCalled());
+
+    expect(screen.getByText(/restoring your session/i)).toBeInTheDocument();
+    expect(screen.queryByText('login page')).not.toBeInTheDocument();
+
+    answer({ status: 401 });   // let the refresh settle so it doesn't leak into the next test
+    expect(await screen.findByText('login page')).toBeInTheDocument();
   });
 
-  it('treats a corrupted stored session as signed out', () => {
-    localStorage.setItem(TOKEN_KEY, 'not-a-jwt');
-    localStorage.setItem(USER_KEY, '{broken');
+  it('treats a server error during restore as signed out', async () => {
+    mockApi(() => ({ status: 500 }));
     renderAt('/doctor');
-    expect(screen.getByText('login page')).toBeInTheDocument();
+    expect(await screen.findByText('login page')).toBeInTheDocument();
+  });
+
+  it('never stores tokens in localStorage', async () => {
+    hasRefreshCookieFor('DOCTOR');
+    renderAt('/doctor');
+    await screen.findByText('doctor workspace');
+    expect(localStorage.length).toBe(0);
   });
 });

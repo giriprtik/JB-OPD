@@ -1,5 +1,7 @@
 package com.hospital.opd.exception;
 
+import io.github.resilience4j.bulkhead.BulkheadFullException;
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
@@ -68,6 +70,21 @@ public class GlobalExceptionHandler {
         pd.setTitle("Downstream service error");
         pd.setProperty("service", ex.getService());
         pd.setProperty("downstreamStatus", ex.getDownstreamStatus());
+        return pd;
+    }
+
+    /**
+     * Circuit breaker open, or too many concurrent calls to a slow dependency. Fail fast with a clear message;
+     * registration and triage don't depend on the lab, so they keep working.
+     */
+    @ExceptionHandler({CallNotPermittedException.class, BulkheadFullException.class})
+    public ProblemDetail dependencyUnavailable(RuntimeException ex) {
+        log.warn("Fast-failing a downstream call: {}", ex.getMessage());
+        ProblemDetail pd = problem(HttpStatus.SERVICE_UNAVAILABLE,
+                "A connected system (lab or staff directory) is not responding. "
+                        + "Registration and triage still work; try this again in a few seconds.");
+        pd.setTitle("Dependency unavailable");
+        pd.setProperty("retryAfterSeconds", 20);
         return pd;
     }
 

@@ -1,0 +1,85 @@
+name: CD
+
+# Release = push a version tag (git tag v1.0.0 && git push origin v1.0.0), after CI is green on main.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing image tag to deploy (e.g. v1.0.0)
+        required: true
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  images:
+    name: build ${{ matrix.service }}
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: true
+      matrix:
+        service: [jb-auth-service, jb-opd-service, jb-lab-service, jb-gateway, jb-hospital-ui]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Lower-case owner (GHCR requires it)
+        run: echo "OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.service }}
+          push: true
+          tags: ${{ env.REGISTRY }}/${{ env.OWNER }}/${{ matrix.service }}:${{ github.ref_name }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}
+
+  deploy:
+    name: deploy to server
+    needs: [images]
+    # Runs after images on a tag push, or alone for a manual redeploy / rollback of an existing tag.
+    if: always() && (needs.images.result == 'success' || needs.images.result == 'skipped')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production        # add required reviewers in Settings > Environments for a manual approval gate
+    concurrency:
+      group: deploy-production
+      cancel-in-progress: false
+    steps:
+      - name: Work out the tag
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          echo "TAG=$TAG" >> "$GITHUB_ENV"
+          echo "OWNER=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_ENV"
+
+      - name: Set up SSH
+        run: |
+          install -m 700 -d ~/.ssh
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          echo "${{ secrets.DEPLOY_KNOWN_HOSTS }}" > ~/.ssh/known_hosts
+
+      - name: Deploy
+        run: |
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+            "cd /opt/jb && export IMAGE_TAG=$TAG GHCR_OWNER=$OWNER && \
+             docker compose -f docker-compose.yml -f docker-compose.prod.yml pull && \
+             docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --remove-orphans && \
+             docker image prune -f"
+
+      - name: Smoke test the live site
+        run: |
+          sleep 20
+          curl -fsS --retry 10 --retry-delay 6 --retry-all-errors -o /dev/null "https://${{ secrets.PUBLIC_HOSTNAME }}/"
+          echo "Site is up on $TAG"

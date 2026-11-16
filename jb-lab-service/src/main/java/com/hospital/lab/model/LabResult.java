@@ -1,5 +1,6 @@
 package com.hospital.lab.model;
 
+import com.hospital.lab.crypto.EncryptedStringConverter;
 import jakarta.persistence.*;
 import java.time.OffsetDateTime;
 
@@ -24,7 +25,8 @@ public class LabResult {
     @Column(name = "parameter_name", nullable = false, length = 100)
     private String parameterName;
 
-    @Column(name = "observed_value", nullable = false, length = 50)
+    @Convert(converter = EncryptedStringConverter.class)   // AES-GCM at rest
+    @Column(name = "observed_value", nullable = false, columnDefinition = "TEXT")   // ciphertext is longer than the value
     private String observedValue;
 
     @Column(name = "reference_range", length = 100)
@@ -33,6 +35,7 @@ public class LabResult {
     @Column(name = "is_abnormal", nullable = false)
     private boolean abnormal = false;
 
+    @Convert(converter = EncryptedStringConverter.class)   // AES-GCM at rest
     @Column(name = "technician_notes", columnDefinition = "TEXT")
     private String technicianNotes;
 

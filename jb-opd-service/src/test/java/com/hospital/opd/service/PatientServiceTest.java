@@ -11,6 +11,8 @@ import com.hospital.opd.repository.PatientRepository;
 import com.hospital.opd.repository.VisitRepository;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.mockito.ArgumentCaptor;
 
 import java.time.LocalDate;
@@ -35,7 +37,8 @@ class PatientServiceTest {
 
     @BeforeEach
     void setUp() {
-        service = new PatientService(patients, visits, visitService, doctors);
+        service = new PatientService(patients, visits, visitService, doctors,
+                new TransactionTemplate(mock(PlatformTransactionManager.class)));   // runs callbacks inline
         when(patients.save(any(Patient.class))).thenAnswer(inv -> {
             Patient p = inv.getArgument(0);
             p.setId(11L);

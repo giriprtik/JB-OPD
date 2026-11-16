@@ -45,7 +45,7 @@ class TriageServiceTest {
         assertThat(response.getRecordedBy()).isEqualTo("nurse");
         assertThat(response.getSymptomsBrief()).isEqualTo("mild cough");
         verify(visitService).transitionStatus(eq(5L), eq(EnumSet.of(VisitStatus.REGISTERED)), eq(VisitStatus.TRIAGED),
-                eq("nurse"), contains("BP 120/80"));
+                eq("nurse"), eq("Vitals recorded"));   // no readings in the audit trail (they are clinical data)
     }
 
     @Test

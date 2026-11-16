@@ -1,5 +1,6 @@
 package com.hospital.opd.service;
 
+import com.github.benmanes.caffeine.cache.Cache;
 import com.hospital.opd.dto.LabOrderSummary;
 import com.hospital.opd.dto.LabResultItem;
 import com.hospital.opd.dto.VisitConclusionRequest;
@@ -7,6 +8,7 @@ import com.hospital.opd.dto.VisitLabResults;
 import com.hospital.opd.model.Visit;
 import com.hospital.opd.model.VisitStatus;
 import com.hospital.opd.repository.VisitRepository;
+import com.hospital.opd.security.ServiceTokenProvider;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Propagation;
@@ -33,25 +35,34 @@ public class ConsultationWorkflowService {
     private final VisitService visitService;
     private final LabIntegrationService labIntegrationService;
     private final LabReportPdfService labReportPdfService;
+    private final ServiceTokenProvider serviceTokens;
+    private final Cache<Long, byte[]> labReportCache;
 
     public ConsultationWorkflowService(VisitRepository visitRepository,
                                        VisitService visitService,
                                        LabIntegrationService labIntegrationService,
-                                       LabReportPdfService labReportPdfService) {
+                                       LabReportPdfService labReportPdfService,
+                                       ServiceTokenProvider serviceTokens,
+                                       Cache<Long, byte[]> labReportCache) {
         this.visitRepository = visitRepository;
         this.visitService = visitService;
         this.labIntegrationService = labIntegrationService;
         this.labReportPdfService = labReportPdfService;
+        this.serviceTokens = serviceTokens;
+        this.labReportCache = labReportCache;
     }
 
-    /** Asks lab which waiting orders are done; moves those visits to LAB_RESULTS_READY. */
+    /**
+     * Asks lab which waiting orders are done; moves those visits to LAB_RESULTS_READY.
+     * Uses the service token: the access decision was made here (or this is the background sync).
+     */
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    public int refreshLabStatuses(String authorization) {
+    public int refreshLabStatuses() {
         List<Visit> waiting = visitRepository.findByStatusAndLatestLabOrderIdIsNotNull(VisitStatus.AWAITING_LAB);
         if (waiting.isEmpty()) return 0;
 
         Map<Long, LabOrderSummary> orders = labIntegrationService
-                .getOrders(waiting.stream().map(Visit::getLatestLabOrderId).toList(), authorization)
+                .getOrders(waiting.stream().map(Visit::getLatestLabOrderId).toList(), serviceTokens.bearer())
                 .stream()
                 .collect(Collectors.toMap(LabOrderSummary::id, Function.identity()));
 
@@ -93,26 +104,36 @@ public class ConsultationWorkflowService {
 
     /** Lab order + results for the visit, or empty if no lab order was placed. */
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    public Optional<VisitLabResults> getLabResults(Long visitId, String authorization) {
+    public Optional<VisitLabResults> getLabResults(Long visitId) {
         Visit visit = visitRepository.findById(visitId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Visit not found: " + visitId));
-        return loadLabResults(visit, authorization);
+        return loadLabResults(visit);
     }
 
-    /** PDF lab report for the visit's latest (completed) lab order. */
+    /**
+     * PDF lab report for the visit's latest (completed) lab order.
+     * Cached by order id: a repeat view skips both lab calls and the render.
+     */
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    public LabReport getLabReport(Long visitId, String authorization) {
+    public LabReport getLabReport(Long visitId) {
         Visit visit = visitRepository.findWithPatient(visitId)
                 .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Visit not found: " + visitId));
-
-        VisitLabResults lab = loadLabResults(visit, authorization)
-                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No lab order for this visit"));
-        if (!"COMPLETED".equals(lab.orderStatus())) {
-            throw new ResponseStatusException(HttpStatus.CONFLICT, "Lab results are not released yet");
+        Long orderId = visit.getLatestLabOrderId();
+        if (orderId == null) {
+            throw new ResponseStatusException(HttpStatus.NOT_FOUND, "No lab order for this visit");
         }
 
-        byte[] pdf = labReportPdfService.render(visit, visit.getPatient(), lab);
-        String fileName = "lab-report-" + visit.getPatient().getMrn() + "-order-" + lab.orderId() + ".pdf";
+        byte[] pdf = labReportCache.getIfPresent(orderId);
+        if (pdf == null) {
+            VisitLabResults lab = loadLabResults(visit)
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "No lab order for this visit"));
+            if (!"COMPLETED".equals(lab.orderStatus())) {
+                throw new ResponseStatusException(HttpStatus.CONFLICT, "Lab results are not released yet");
+            }
+            pdf = labReportPdfService.render(visit, visit.getPatient(), lab);   // bulkhead-limited
+            labReportCache.put(orderId, pdf);                                    // only completed reports are cached
+        }
+        String fileName = "lab-report-" + visit.getPatient().getMrn() + "-order-" + orderId + ".pdf";
         return new LabReport(fileName, pdf);
     }
 
@@ -136,10 +157,11 @@ public class ConsultationWorkflowService {
         visit.setStatus(VisitStatus.COMPLETED);
         visit.setCompletedAt(OffsetDateTime.now());
         visitService.recordEvent(visitId, from, VisitStatus.COMPLETED, doctorUsername,
-                "Signed off. Diagnosis: " + visit.getDiagnosis());
+                "Signed off");   // the diagnosis is stored encrypted on the visit, never copied into the audit trail
     }
 
-    private Optional<VisitLabResults> loadLabResults(Visit visit, String authorization) {
+    private Optional<VisitLabResults> loadLabResults(Visit visit) {
+        String authorization = serviceTokens.bearer();   // OPD already checked the caller may read this visit
         Long orderId = visit.getLatestLabOrderId();
         if (orderId == null) return Optional.empty();
 

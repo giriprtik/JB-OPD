@@ -44,7 +44,7 @@ public class SecurityConfig {
             .httpBasic(b -> b.disable())
             .formLogin(f -> f.disable())
             .authorizeHttpRequests(auth -> auth
-                .requestMatchers("/api/v1/auth/login", "/actuator/health", "/error").permitAll()
+                .requestMatchers("/api/v1/auth/login", "/api/v1/auth/refresh", "/api/v1/auth/logout", "/actuator/health", "/error").permitAll()
                 .anyRequest().authenticated())
             .exceptionHandling(ex -> ex.authenticationEntryPoint(authenticationEntryPoint))
             .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);

@@ -1,52 +1,65 @@
-import { createContext, useContext, useState, type ReactNode } from 'react';
-import { TOKEN_KEY, USER_KEY } from '../lib/api';
+import { createContext, useContext, useEffect, useState, type ReactNode } from 'react';
+import { refreshAccessToken, registerSessionListener, setAccessToken, type SessionResponse } from '../lib/api';
 import { AuthApi } from '../lib/services';
 import type { Role, SessionUser } from '../lib/types';
+import { Spinner } from '../components/ui';
 
 interface AuthState {
   user: SessionUser | null;
   login: (username: string, password: string) => Promise<SessionUser>;
-  logout: () => void;
+  logout: () => Promise<void>;
   hasRole: (...roles: Role[]) => boolean;
 }
 
 const AuthContext = createContext<AuthState | null>(null);
 
-/** Restores a session only if the stored token has not expired. */
-function restore(): SessionUser | null {
-  try {
-    const token = localStorage.getItem(TOKEN_KEY);
-    const raw = localStorage.getItem(USER_KEY);
-    if (!token || !raw) return null;
-    const { exp } = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
-    if (typeof exp === 'number' && exp * 1000 < Date.now()) throw new Error('expired');
-    return JSON.parse(raw) as SessionUser;
-  } catch {
-    localStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem(USER_KEY);
-    return null;
-  }
-}
+const toUser = (s: SessionResponse): SessionUser => ({ username: s.username, fullName: s.fullName, role: s.role });
 
+/**
+ * The access token lives only in memory (lib/api). On page load we have none, so we ask the auth
+ * service to swap the HttpOnly refresh cookie for one; until that answers, nothing route-guarded renders.
+ */
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<SessionUser | null>(restore);
+  const [user, setUser] = useState<SessionUser | null>(null);
+  const [ready, setReady] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    registerSessionListener((session) => { if (active) setUser(session ? toUser(session) : null); });
+    refreshAccessToken().finally(() => { if (active) setReady(true); });
+    return () => {
+      active = false;
+      registerSessionListener(null);
+    };
+  }, []);
 
   const login = async (username: string, password: string) => {
     const res = await AuthApi.login(username, password);
-    const u: SessionUser = { username: res.username, fullName: res.fullName, role: res.role };
-    localStorage.setItem(TOKEN_KEY, res.accessToken);
-    localStorage.setItem(USER_KEY, JSON.stringify(u));
+    setAccessToken(res.accessToken);
+    const u = toUser(res);
     setUser(u);
     return u;
   };
 
-  const logout = () => {
-    localStorage.removeItem(TOKEN_KEY);
-    localStorage.removeItem(USER_KEY);
+  const logout = async () => {
+    try {
+      await AuthApi.logout();   // revokes the refresh token server-side and clears the cookie
+    } catch {
+      /* offline or already expired: signing out locally is still right */
+    }
+    setAccessToken(null);
     setUser(null);
   };
 
   const hasRole = (...roles: Role[]) => !!user && roles.includes(user.role);
+
+  if (!ready) {
+    return (
+      <div className="grid min-h-screen place-items-center">
+        <Spinner label="Restoring your session…" />
+      </div>
+    );
+  }
 
   return <AuthContext.Provider value={{ user, login, logout, hasRole }}>{children}</AuthContext.Provider>;
 }

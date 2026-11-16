@@ -15,6 +15,7 @@ import org.springframework.web.server.ResponseStatusException;
 import java.util.Collection;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Optional;
 import java.util.Locale;
 import java.util.Map;
 import java.util.function.Function;
@@ -31,9 +32,25 @@ public class LabOrderService {
         this.sampleRepository = sampleRepository;
     }
 
+    /** isNew = false when the request id was seen before and the existing order is returned. */
+    public record Created(LabOrderResponse order, boolean isNew) {}
+
+    /**
+     * Creates an order, or returns the existing one if this requestId was already used (idempotent).
+     * Two deliveries racing on the same key: the unique index rejects the second insert, the transaction
+     * rolls back, the handler answers 409, and the caller's retry then takes the findByRequestId path.
+     */
     @Transactional
-    public LabOrderResponse createOrder(LabOrderRequest request, String doctorUsername) {
+    public Created createOrder(LabOrderRequest request, String doctorUsername) {
+        if (request.getRequestId() != null) {
+            Optional<LabOrder> existing = labOrderRepository.findByRequestId(request.getRequestId());
+            if (existing.isPresent()) {
+                return new Created(toResponse(existing.get(), sampleRepository.findByOrderId(existing.get().getId())), false);
+            }
+        }
+
         LabOrder order = new LabOrder();
+        order.setRequestId(request.getRequestId());
         order.setVisitId(request.getVisitId());
         order.setPatientMrn(request.getPatientMrn().trim());
         order.setPatientName(request.getPatientName());
@@ -46,8 +63,8 @@ public class LabOrderService {
                 .map(code -> code.toUpperCase(Locale.ROOT))
                 .collect(Collectors.toCollection(LinkedHashSet::new)));
 
-        LabOrder saved = labOrderRepository.save(order);
-        return toResponse(saved, List.of());
+        LabOrder saved = labOrderRepository.saveAndFlush(order);   // flush: a duplicate key fails here, as a 409
+        return new Created(toResponse(saved, List.of()), true);
     }
 
     /**

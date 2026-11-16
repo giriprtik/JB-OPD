@@ -1,9 +1,11 @@
 package com.hospital.lab.model;
 
+import com.hospital.lab.crypto.EncryptedStringConverter;
 import jakarta.persistence.*;
 import java.time.OffsetDateTime;
 import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.UUID;
 
 
 @Entity
@@ -34,6 +36,7 @@ public class LabOrder {
     @Column(name = "order_status", nullable = false, length = 25)
     private LabOrderStatus orderStatus = LabOrderStatus.PLACED;
 
+    @Convert(converter = EncryptedStringConverter.class)   // AES-GCM at rest
     @Column(name = "clinical_history", columnDefinition = "TEXT")
     private String clinicalHistory;
 
@@ -41,6 +44,10 @@ public class LabOrder {
     @CollectionTable(name = "lab_order_tests", joinColumns = @JoinColumn(name = "order_id"))
     @Column(name = "test_code", nullable = false, length = 20)
     private Set<String> testCodes = new LinkedHashSet<>();
+
+    /** Idempotency key from the caller (OPD outbox); unique when present. */
+    @Column(name = "request_id", updatable = false)
+    private UUID requestId;
 
     @Column(name = "ordered_at", nullable = false, updatable = false)
     private OffsetDateTime orderedAt;
@@ -77,4 +84,6 @@ public class LabOrder {
     public void setTestCodes(Set<String> testCodes) { this.testCodes = testCodes; }
     public OffsetDateTime getOrderedAt() { return orderedAt; }
     public OffsetDateTime getUpdatedAt() { return updatedAt; }
+    public UUID getRequestId() { return requestId; }
+    public void setRequestId(UUID requestId) { this.requestId = requestId; }
 }

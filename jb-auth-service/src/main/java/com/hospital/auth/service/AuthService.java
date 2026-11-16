@@ -21,16 +21,22 @@ import java.util.Locale;
 @Service
 public class AuthService {
 
+    /** What the controller needs back: the JSON body, plus the raw refresh token for the cookie. */
+    public record LoginResult(LoginResponse response, String refreshToken) {}
+
     private final UserAccountRepository userAccountRepository;
     private final PasswordEncoder passwordEncoder;
     private final JwtTokenProvider tokenProvider;
+    private final RefreshTokenService refreshTokenService;
 
     public AuthService(UserAccountRepository userAccountRepository,
                        PasswordEncoder passwordEncoder,
-                       JwtTokenProvider tokenProvider) {
+                       JwtTokenProvider tokenProvider,
+                       RefreshTokenService refreshTokenService) {
         this.userAccountRepository = userAccountRepository;
         this.passwordEncoder = passwordEncoder;
         this.tokenProvider = tokenProvider;
+        this.refreshTokenService = refreshTokenService;
     }
 
     @Transactional
@@ -59,14 +65,32 @@ public class AuthService {
         return userAccountRepository.save(user);
     }
 
-    @Transactional(readOnly = true)
-    public LoginResponse authenticateUser(LoginRequest request) {
+    /** Checks the password, then starts a refresh-token family (a new row, hence not read-only). */
+    @Transactional
+    public LoginResult authenticateUser(LoginRequest request, String userAgent) {
         // Same message for unknown user, wrong password and disabled account: don't leak which one it was.
         UserAccount user = userAccountRepository.findByUsername(request.username().trim())
                 .filter(UserAccount::isEnabled)
                 .filter(u -> passwordEncoder.matches(request.password(), u.getPassword()))
                 .orElseThrow(() -> new InvalidCredentialsException("Invalid username or password."));
 
+        RefreshTokenService.Issued refresh = refreshTokenService.startSession(user, userAgent);
+        return new LoginResult(toLoginResponse(user), refresh.rawToken());
+    }
+
+    /**
+     * Rotates the refresh token and mints a new access token.
+     * noRollbackFor: on token reuse, rotate() revokes the family and then throws; without this the
+     * outer transaction would roll the revocation back.
+     */
+    @Transactional(noRollbackFor = InvalidCredentialsException.class)
+    public LoginResult refresh(String rawRefreshToken, String userAgent) {
+        RefreshTokenService.Issued refresh = refreshTokenService.rotate(rawRefreshToken, userAgent);
+        UserAccount user = refresh.entity().getUser();   // lazy relation, still inside the transaction
+        return new LoginResult(toLoginResponse(user), refresh.rawToken());
+    }
+
+    private LoginResponse toLoginResponse(UserAccount user) {
         String token = tokenProvider.generateToken(user.getUsername(), user.getRole(), user.getFullName());
         return new LoginResponse(token, "Bearer", tokenProvider.getExpirationMs(),
                 user.getUsername(), user.getFullName(), user.getRole());
