@@ -37,6 +37,14 @@ log "Signed in as nurse"
 DOCTOR=$(login doctor);   [[ -n "$DOCTOR" ]]  || fail "doctor login"
 LABTECH=$(login labtech); [[ -n "$LABTECH" ]] || fail "labtech login"
 
+log "Waiting for OPD and Lab services to be ready"
+until [[ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $NURSE" "$BASE/api/v1/opd/visits/triage-queue")" == "200" ]] \
+   && [[ "$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $DOCTOR" "$BASE/api/v1/lab/tests")" == "200" ]]; do
+  (( $(date +%s) < deadline )) || fail "OPD or Lab service did not become ready in ${TIMEOUT_S}s"
+  sleep 5
+done
+log "All backend services ready"
+
 log "Role checks through the gateway"
 expect_status 200 GET  /api/v1/auth/doctors              "$NURSE"
 expect_status 200 GET  /api/v1/opd/visits/triage-queue   "$NURSE"
