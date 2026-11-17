@@ -49,6 +49,8 @@ services:
     image: ghcr.io/${GHCR_OWNER}/jb-gateway:${IMAGE_TAG}
     build: !reset null
     ports: !reset []                       # reachable only through the UI's nginx
+    environment:
+      CORS_ALLOWED_ORIGINS: https://${PUBLIC_HOSTNAME}
 
   jb-hospital-ui:
     image: ghcr.io/${GHCR_OWNER}/jb-hospital-ui:${IMAGE_TAG}
